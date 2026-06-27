@@ -501,10 +501,58 @@ const resultEl = document.getElementById("result");
 const locInput = document.getElementById("location");
 const groupSelect = document.getElementById("group");
 
+// V1 atmospheric system: how thick/smoky the ambient layer feels, per category.
+// Clean air → ~0 (crisp); hazardous → ~0.8 (a heavy haze creeps in at the edges).
+const CATEGORY_HAZE = {
+  "Good": 0, "Moderate": 0.14, "Unhealthy for Sensitive Groups": 0.28,
+  "Unhealthy": 0.45, "Very Unhealthy": 0.62, "Hazardous": 0.8,
+};
+
 function setAccent(cat) {
   const [accent, tint] = CATEGORY_ACCENT[cat] || CATEGORY_ACCENT["Good"];
-  document.documentElement.style.setProperty("--accent", accent);
-  document.documentElement.style.setProperty("--accent-tint", tint);
+  const root = document.documentElement.style;
+  root.setProperty("--accent", accent);
+  root.setProperty("--accent-tint", tint);
+  // The whole interface "breathes with the air": drive the ambient haze and a
+  // category slug the background/particle layers react to.
+  root.setProperty("--haze", String(CATEGORY_HAZE[cat] ?? 0));
+  document.body.dataset.air = (cat || "Good").toLowerCase().replace(/[^a-z]+/g, "-");
+}
+
+// Order of US EPA categories, used to place the gauge tick along the dial.
+const CATEGORY_ORDER = [
+  "Good", "Moderate", "Unhealthy for Sensitive Groups",
+  "Unhealthy", "Very Unhealthy", "Hazardous",
+];
+const CATEGORY_BOUNDS = [0, 50, 100, 150, 200, 300, 500];
+
+// V2: angle (deg, clockwise from top) where this AQI lands on the 6-segment
+// scale dial — each category occupies an equal 60° arc, interpolated within.
+function gaugeTickAngle(aqi, category) {
+  let i = CATEGORY_ORDER.indexOf(category);
+  if (i < 0) i = 0;
+  const lo = CATEGORY_BOUNDS[i];
+  const hi = CATEGORY_BOUNDS[i + 1];
+  const frac = Math.max(0, Math.min(1, (aqi - lo) / (hi - lo)));
+  return ((i + frac) / 6) * 360;
+}
+
+const prefersReducedMotion = () =>
+  window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// V2: animate the big AQI number counting up from 0.
+function countUp(el, target) {
+  if (!el) return;
+  if (prefersReducedMotion()) { el.textContent = String(target); return; }
+  const dur = 900;
+  const start = performance.now();
+  function step(now) {
+    const t = Math.min(1, (now - start) / dur);
+    const eased = 1 - Math.pow(1 - t, 3);
+    el.textContent = String(Math.round(target * eased));
+    if (t < 1) requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
 }
 
 function esc(s) {
@@ -522,14 +570,28 @@ function placeholder() {
 }
 
 function renderError(msg) {
-  resultEl.innerHTML = `<div class="error-card"><h3>Hmm.</h3><p>${esc(msg)}</p></div>`;
+  resultEl.innerHTML = `<div class="error-card">
+    <div class="err-ico" aria-hidden="true">⚠️</div>
+    <h3>Hmm, that didn't work</h3><p>${esc(msg)}</p></div>`;
 }
 
-function ringDash(aqi) {
+// V2: a radial dial whose ring shows the whole Good→Hazardous scale as six
+// coloured segments, with a tick marking where this reading lands.
+function gaugeSvg(aqi, category) {
   const R = 52;
   const c = 2 * Math.PI * R;
-  const frac = Math.max(0.04, Math.min(1, aqi / 300));
-  return { c, offset: c * (1 - frac) };
+  const seg = c / 6;
+  const gap = 7;
+  const segs = CATEGORY_ORDER.map((cat, i) => {
+    const col = CATEGORY_ACCENT[cat][0];
+    return `<circle class="seg" cx="60" cy="60" r="${R}" stroke="${col}"
+      stroke-dasharray="${(seg - gap).toFixed(1)} ${(c - seg + gap).toFixed(1)}"
+      stroke-dashoffset="${(-i * seg).toFixed(1)}"></circle>`;
+  }).join("");
+  const angle = gaugeTickAngle(aqi, category);
+  const tick = `<line class="tick" x1="103" y1="60" x2="121" y2="60"
+      transform="rotate(${angle.toFixed(1)} 60 60)"></line>`;
+  return `<svg viewBox="0 0 120 120" class="dial">${segs}${tick}</svg>`;
 }
 
 function groupLabel(g) {
@@ -585,8 +647,18 @@ function cigaretteBlock(d) {
     : "";
   return `
     <div class="cig">
-      <div class="cig-head">🚬 Today's air ≈ <b>${n}</b> cigarette${n === 1 ? "" : "s"}</div>
-      ${weekLine}
+      <div class="cig-main">
+        <span class="cig-ico" aria-hidden="true">🚬</span>
+        <div class="cig-body">
+          <div class="cig-head">Today's air ≈ <b>${n}</b> cigarette${n === 1 ? "" : "s"}</div>
+          ${weekLine}
+        </div>
+        <button class="cig-share" type="button" aria-label="Share this as an image"
+          data-cig="${n}" data-loc="${esc(d.location || "")}" data-aqi="${d.aqi}" data-cat="${esc(d.category)}">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 9V5l7 7-7 7v-4C7 12 5 16 4 20c0-7 3-11 10-11Z"/></svg>
+          Share
+        </button>
+      </div>
       <details class="more">
         <summary>What does this mean?</summary>
         <p>Based on the Berkeley Earth equivalence: breathing about 22 µg/m³ of PM2.5
@@ -596,9 +668,74 @@ function cigaretteBlock(d) {
     </div>`;
 }
 
+// V3: render the cigarette stat as a shareable square image (no tracking; the
+// image is built locally and handed to the OS share sheet or downloaded).
+function fitFont(ctx, text, weight, family, startPx, maxWidth) {
+  let px = startPx;
+  do {
+    ctx.font = `${weight} ${px}px ${family}`;
+    if (ctx.measureText(text).width <= maxWidth) break;
+    px -= 6;
+  } while (px > 24);
+  return px;
+}
+
+async function shareCigarette(btn) {
+  const { cig, loc, aqi, cat } = btn.dataset;
+  if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch (e) { /* ignore */ } }
+  const W = 1080;
+  const canvas = document.createElement("canvas");
+  canvas.width = W; canvas.height = W;
+  const ctx = canvas.getContext("2d");
+  const accent = (CATEGORY_ACCENT[cat] || CATEGORY_ACCENT["Good"])[0];
+  const g = ctx.createLinearGradient(0, 0, W, W);
+  g.addColorStop(0, "#0b6f6b"); g.addColorStop(1, accent);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, W);
+  ctx.textAlign = "center"; ctx.fillStyle = "#fff";
+  const serif = "'Fraunces', Georgia, serif";
+  const sans = "'Hanken Grotesk', system-ui, sans-serif";
+
+  ctx.globalAlpha = 0.92;
+  ctx.font = `600 48px ${sans}`;
+  ctx.fillText("Today’s air in", W / 2, 250);
+  const locPx = fitFont(ctx, loc, "700", serif, 76, W - 160);
+  ctx.font = `700 ${locPx}px ${serif}`;
+  ctx.fillText(loc, W / 2, 250 + locPx + 18);
+
+  ctx.globalAlpha = 1;
+  ctx.font = `700 260px ${serif}`;
+  ctx.fillText(`≈ ${cig}`, W / 2, 650);
+  ctx.font = `600 54px ${sans}`;
+  ctx.fillText(`cigarette${cig === "1" ? "" : "s"} of harm today`, W / 2, 730);
+  ctx.globalAlpha = 0.9;
+  ctx.font = `500 44px ${sans}`;
+  ctx.fillText(`US AQI ${aqi} · ${cat}`, W / 2, 820);
+
+  ctx.globalAlpha = 1;
+  ctx.font = `700 50px ${serif}`;
+  ctx.fillText("AirAware", W / 2, 965);
+  ctx.globalAlpha = 0.85;
+  ctx.font = `400 33px ${sans}`;
+  ctx.fillText("softbrowndog.github.io/AirAware", W / 2, 1015);
+
+  const blob = await new Promise((res) => canvas.toBlob(res, "image/png"));
+  if (!blob) return;
+  const file = new File([blob], "airaware.png", { type: "image/png" });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: "AirAware",
+        text: `Today’s air ≈ ${cig} cigarettes of harm.` });
+      return;
+    } catch (e) { /* user cancelled or unsupported — fall through to download */ }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "airaware.png"; a.click();
+  URL.revokeObjectURL(url);
+}
+
 function renderResult(d) {
   setAccent(d.category);
-  const { c, offset } = ringDash(d.aqi);
   const maskTag = d.wear_mask ? `<span class="tag mask">😷 Wear an N95 outdoors</span>` : "";
   const domTag = d.dominant_pollutant ? `<span class="tag"><span class="dot"></span>${esc(d.dominant_pollutant)}</span>` : "";
   const peakTag = d.peak_window ? `<span class="tag">⏱ Worst ${esc(d.peak_window)}</span>` : "";
@@ -640,12 +777,8 @@ function renderResult(d) {
     <article class="card">
       <div class="card-top">
         <div class="gauge">
-          <svg viewBox="0 0 120 120">
-            <circle class="track" cx="60" cy="60" r="52"></circle>
-            <circle class="value" cx="60" cy="60" r="52"
-              stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${c.toFixed(1)}"></circle>
-          </svg>
-          <div class="gauge-num"><b>${d.aqi}</b><small>US AQI</small></div>
+          ${gaugeSvg(d.aqi, d.category)}
+          <div class="gauge-num"><b class="aqi-count">0</b><small>US AQI</small></div>
         </div>
         <div class="card-head">
           <h2>${esc(d.location)}</h2>
@@ -654,13 +787,13 @@ function renderResult(d) {
         </div>
       </div>
       <div class="card-body">
-        <p class="headline">${esc(d.headline)}</p>
-        <p class="action">${esc(d.action)}</p>
-        ${cigaretteBlock(d)}
-        ${whyBlock}
-        ${windowsBlock}
-        <div class="meta">${maskTag}${domTag}${peakTag}${bestTag}${whoTag}</div>
-        ${pollutantBars(d.pollutants)}
+        <p class="headline reveal" style="--i:0">${esc(d.headline)}</p>
+        <p class="action reveal" style="--i:1">${esc(d.action)}</p>
+        <div class="reveal" style="--i:2">${cigaretteBlock(d)}</div>
+        <div class="reveal" style="--i:3">${whyBlock}</div>
+        <div class="reveal" style="--i:4">${windowsBlock}</div>
+        <div class="meta reveal" style="--i:5">${maskTag}${domTag}${peakTag}${bestTag}${whoTag}</div>
+        <div class="reveal" style="--i:6">${pollutantBars(d.pollutants)}</div>
       </div>
       <div class="card-foot">
         ${trustBlock}
@@ -668,16 +801,37 @@ function renderResult(d) {
       </div>
     </article>`;
 
-  requestAnimationFrame(() => {
-    const v = resultEl.querySelector(".gauge .value");
-    if (v) v.style.strokeDashoffset = offset.toFixed(1);
-  });
+  requestAnimationFrame(() => countUp(resultEl.querySelector(".aqi-count"), d.aqi));
 }
 
 // ---------- flows ----------
 
+// V6: a shimmering skeleton of the result card while live data loads, so the
+// layout settles instead of jumping in from a blank panel.
+function skeleton() {
+  resultEl.innerHTML = `
+    <article class="card skeleton" aria-hidden="true">
+      <div class="card-top">
+        <div class="sk sk-gauge"></div>
+        <div class="sk-head">
+          <div class="sk sk-line w60"></div>
+          <div class="sk sk-line w40"></div>
+          <div class="sk sk-pill"></div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="sk sk-line w80"></div>
+        <div class="sk sk-line w90"></div>
+        <div class="sk sk-block"></div>
+        <div class="sk sk-line w70"></div>
+        <div class="sk sk-bars"></div>
+      </div>
+    </article>`;
+}
+
 async function withLoading(fn) {
   document.body.dataset.state = "loading";
+  skeleton();
   try {
     renderResult(await fn());
   } catch (e) {
@@ -757,6 +911,13 @@ document.querySelectorAll(".chip").forEach((chip) => {
     check(chip.dataset.loc, chip.dataset.group);
     document.querySelector(".hero-result").scrollIntoView({ behavior: "smooth", block: "nearest" });
   });
+});
+
+// One delegated handler for the cigarette "Share" button (the card markup is
+// re-rendered on every check, so we listen on the stable container).
+resultEl.addEventListener("click", (e) => {
+  const btn = e.target.closest(".cig-share");
+  if (btn) shareCigarette(btn);
 });
 
 placeholder();

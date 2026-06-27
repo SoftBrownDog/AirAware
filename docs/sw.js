@@ -4,7 +4,7 @@
  * always go to the network for live air-quality / geocoding APIs (never cache
  * readings — stale air data would be misleading). Bump CACHE on shell changes.
  */
-const CACHE = "airaware-shell-v1";
+const CACHE = "airaware-shell-v2";
 const SHELL = [
   "./",
   "./index.html",
@@ -35,16 +35,20 @@ self.addEventListener("fetch", (event) => {
   // Live data is never cached — always fetch fresh, fail honestly when offline.
   if (url.origin !== self.location.origin) return;
 
+  // Stale-while-revalidate for the shell: serve cache instantly for offline
+  // speed, but always refresh it in the background so a new deploy is picked
+  // up on the next visit without manual cache-busting.
   event.respondWith(
-    caches.match(request).then((cached) =>
-      cached ||
-      fetch(request)
-        .then((resp) => {
-          const copy = resp.clone();
-          caches.open(CACHE).then((c) => c.put(request, copy));
-          return resp;
-        })
-        .catch(() => caches.match("./index.html"))
+    caches.open(CACHE).then((cache) =>
+      cache.match(request).then((cached) => {
+        const network = fetch(request)
+          .then((resp) => {
+            if (resp && resp.ok) cache.put(request, resp.clone());
+            return resp;
+          })
+          .catch(() => cached || cache.match("./index.html"));
+        return cached || network;
+      })
     )
   );
 });

@@ -27,6 +27,8 @@
   /* current accent — overridden when a result loads */
   --accent: var(--teal);
   --accent-tint: rgba(14, 165, 160, 0.12);
+  /* ambient haze (0 clean → ~0.8 hazardous), set per AQI category */
+  --haze: 0;
 }
 
 /* Dark mode: re-derive surfaces/ink and brighten AQI colours so category
@@ -95,8 +97,23 @@ body::after {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
 }
 
-/* Drifting "air" particles */
-.air-field { position: fixed; inset: 0; z-index: -1; pointer-events: none; }
+/* V1: ambient haze that thickens toward the edges as the air worsens. The
+   centre stays clear so card text keeps full contrast. Driven by --haze. */
+.haze {
+  position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  opacity: var(--haze, 0);
+  transition: opacity 1.2s ease, background 1.2s ease;
+  background:
+    radial-gradient(125% 100% at 50% 50%, transparent 42%,
+      color-mix(in srgb, var(--accent) 48%, transparent) 100%),
+    radial-gradient(100% 70% at 50% 118%,
+      color-mix(in srgb, var(--accent) 32%, transparent), transparent 60%);
+}
+
+/* Drifting "air" particles — denser, blurrier (smokier) as --haze rises */
+.air-field { position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  filter: blur(calc(var(--haze) * 1.6px));
+  transition: filter 1.2s ease; }
 .air-field span {
   position: absolute;
   bottom: -8vh;
@@ -273,10 +290,12 @@ body[data-state="loading"] .btn-label { opacity: 0.85; }
   border-bottom: 1px solid var(--line);
 }
 .gauge { position: relative; flex: 0 0 auto; width: 116px; height: 116px; }
-.gauge svg { width: 100%; height: 100%; transform: rotate(-90deg); }
-.gauge .track { fill: none; stroke: var(--accent-tint); stroke-width: 11; }
-.gauge .value { fill: none; stroke: var(--accent); stroke-width: 11; stroke-linecap: round;
-  transition: stroke-dashoffset 1s cubic-bezier(.2,.8,.2,1); }
+.gauge svg { width: 100%; height: 100%; transform: rotate(-90deg); overflow: visible; }
+/* V2: six coloured arcs form a Good→Hazardous scale dial */
+.gauge .seg { fill: none; stroke-width: 9; opacity: 0.92; }
+.gauge .tick { stroke: var(--ink); stroke-width: 4; stroke-linecap: round;
+  filter: drop-shadow(0 0 2px rgba(255,255,255,0.9)); animation: tick-in .7s cubic-bezier(.2,.8,.2,1) both; }
+@keyframes tick-in { from { opacity: 0; } to { opacity: 1; } }
 .gauge-num {
   position: absolute; inset: 0; display: grid; place-content: center; text-align: center;
 }
@@ -319,11 +338,24 @@ body[data-state="loading"] .btn-label { opacity: 0.85; }
   padding: 2px 8px; border-radius: 999px; margin-left: 4px; }
 
 /* Signature: cigarette-equivalent block */
-.cig { margin: 0 0 16px; padding: 14px 16px; border-radius: 14px;
-  background: var(--accent-tint); border: 1px solid var(--line); }
+.cig { margin: 0 0 16px; padding: 16px 18px; border-radius: 16px;
+  background: linear-gradient(135deg, var(--accent-tint), color-mix(in srgb, var(--accent) 4%, var(--card)));
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line)); }
+.cig-main { display: flex; align-items: center; gap: 13px; }
+.cig-ico { font-size: 1.8rem; line-height: 1; flex: 0 0 auto; }
+.cig-body { flex: 1 1 auto; min-width: 0; }
 .cig-head { font-family: "Fraunces", serif; font-size: 1.12rem; font-weight: 600; }
-.cig-head b { color: var(--teal-deep); }
+.cig-head b { font-size: 1.5em; color: var(--teal-deep); }
 .cig-week { margin-top: 4px; font-size: 0.86rem; color: var(--ink-soft); }
+.cig-share {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px;
+  font: inherit; font-size: 0.82rem; font-weight: 700; color: #fff; cursor: pointer;
+  background: var(--accent); border: none; padding: 8px 13px; border-radius: 999px;
+  box-shadow: var(--shadow-sm); transition: transform .15s ease, filter .15s ease;
+}
+.cig-share:hover { transform: translateY(-1px); filter: brightness(1.05); }
+.cig-share svg { width: 15px; height: 15px; fill: none; stroke: #fff; stroke-width: 2;
+  stroke-linejoin: round; stroke-linecap: round; }
 
 /* "Why is the air like this?" + indoor strategy */
 .why { margin: 0 0 14px; color: var(--ink); font-size: 0.96rem; }
@@ -360,12 +392,37 @@ body[data-state="loading"] .btn-label { opacity: 0.85; }
 .trust ul { margin: 10px 0 0; padding-left: 18px; display: grid; gap: 6px; }
 .trust li { font-size: 0.8rem; }
 
+/* V6: staggered reveal of result sections */
+.reveal { animation: reveal-in .5s cubic-bezier(.2,.8,.2,1) both;
+  animation-delay: calc(var(--i, 0) * 55ms); }
+@keyframes reveal-in { from { opacity: 0; transform: translateY(9px); } to { opacity: 1; transform: none; } }
+
+/* V6: shimmering skeleton while live data loads */
+.skeleton .sk {
+  background: linear-gradient(90deg,
+    var(--paper-2) 25%, color-mix(in srgb, var(--accent) 10%, var(--paper-2)) 37%, var(--paper-2) 63%);
+  background-size: 400% 100%; border-radius: 9px; animation: shimmer 1.4s ease infinite;
+}
+.skeleton .sk-gauge { width: 116px; height: 116px; border-radius: 50%; flex: 0 0 auto; }
+.skeleton .sk-head { flex: 1 1 auto; display: grid; gap: 11px; align-content: center; }
+.skeleton .sk-line { height: 13px; }
+.skeleton .w40 { width: 40%; } .skeleton .w60 { width: 60%; } .skeleton .w70 { width: 70%; }
+.skeleton .w80 { width: 80%; } .skeleton .w90 { width: 90%; }
+.skeleton .sk-pill { width: 96px; height: 24px; border-radius: 999px; }
+.skeleton .sk-block { height: 66px; border-radius: 14px; margin: 16px 0; }
+.skeleton .sk-bars { height: 130px; border-radius: 10px; margin-top: 14px; }
+.skeleton .card-body { display: grid; gap: 12px; }
+@keyframes shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+
 .error-card {
   background: var(--card); border: 1px solid var(--line); border-left: 5px solid var(--aqi-unhealthy);
-  border-radius: 16px; padding: 22px 24px; box-shadow: var(--shadow-sm);
+  border-radius: 16px; padding: 24px 26px; box-shadow: var(--shadow-sm);
   animation: card-in .4s ease both;
 }
-.error-card h3 { margin: 0 0 6px; font-family: "Fraunces", serif; color: #8a2b29; }
+.error-card .err-ico { width: 34px; height: 34px; display: grid; place-items: center;
+  border-radius: 50%; background: color-mix(in srgb, var(--aqi-unhealthy) 16%, transparent);
+  font-size: 1.1rem; margin-bottom: 10px; }
+.error-card h3 { margin: 0 0 6px; font-family: "Fraunces", serif; color: var(--aqi-unhealthy); }
 .error-card p { margin: 0; color: var(--ink-soft); }
 
 /* ---------- Sections ---------- */
@@ -379,7 +436,10 @@ section.who, section.how { max-width: 1180px; margin: 0 auto; padding: clamp(40p
 .who-grid li { background: var(--card); border: 1px solid var(--line); border-radius: 18px;
   padding: 24px; box-shadow: var(--shadow-sm); transition: transform .2s ease, box-shadow .2s ease; }
 .who-grid li:hover { transform: translateY(-4px); box-shadow: var(--shadow); }
-.who-ico { font-size: 1.7rem; }
+.who-ico { display: inline-grid; place-items: center; width: 48px; height: 48px;
+  border-radius: 14px; background: var(--accent-tint); }
+.who-ico svg { width: 27px; height: 27px; fill: none; stroke: var(--teal-deep);
+  stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .who-grid h3 { font-family: "Fraunces", serif; font-weight: 600; margin: 12px 0 6px; font-size: 1.15rem; }
 .who-grid p { margin: 0; color: var(--ink-soft); font-size: 0.95rem; }
 

@@ -48,6 +48,8 @@
   /* current accent — overridden when a result loads */
   --accent: var(--teal);
   --accent-tint: rgba(14, 165, 160, 0.12);
+  /* ambient haze (0 clean → ~0.8 hazardous), set per AQI category */
+  --haze: 0;
 }
 
 /* Dark mode: re-derive surfaces/ink and brighten AQI colours so category
@@ -116,8 +118,23 @@ body::after {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
 }
 
-/* Drifting "air" particles */
-.air-field { position: fixed; inset: 0; z-index: -1; pointer-events: none; }
+/* V1: ambient haze that thickens toward the edges as the air worsens. The
+   centre stays clear so card text keeps full contrast. Driven by --haze. */
+.haze {
+  position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  opacity: var(--haze, 0);
+  transition: opacity 1.2s ease, background 1.2s ease;
+  background:
+    radial-gradient(125% 100% at 50% 50%, transparent 42%,
+      color-mix(in srgb, var(--accent) 48%, transparent) 100%),
+    radial-gradient(100% 70% at 50% 118%,
+      color-mix(in srgb, var(--accent) 32%, transparent), transparent 60%);
+}
+
+/* Drifting "air" particles — denser, blurrier (smokier) as --haze rises */
+.air-field { position: fixed; inset: 0; z-index: -1; pointer-events: none;
+  filter: blur(calc(var(--haze) * 1.6px));
+  transition: filter 1.2s ease; }
 .air-field span {
   position: absolute;
   bottom: -8vh;
@@ -294,10 +311,12 @@ body[data-state="loading"] .btn-label { opacity: 0.85; }
   border-bottom: 1px solid var(--line);
 }
 .gauge { position: relative; flex: 0 0 auto; width: 116px; height: 116px; }
-.gauge svg { width: 100%; height: 100%; transform: rotate(-90deg); }
-.gauge .track { fill: none; stroke: var(--accent-tint); stroke-width: 11; }
-.gauge .value { fill: none; stroke: var(--accent); stroke-width: 11; stroke-linecap: round;
-  transition: stroke-dashoffset 1s cubic-bezier(.2,.8,.2,1); }
+.gauge svg { width: 100%; height: 100%; transform: rotate(-90deg); overflow: visible; }
+/* V2: six coloured arcs form a Good→Hazardous scale dial */
+.gauge .seg { fill: none; stroke-width: 9; opacity: 0.92; }
+.gauge .tick { stroke: var(--ink); stroke-width: 4; stroke-linecap: round;
+  filter: drop-shadow(0 0 2px rgba(255,255,255,0.9)); animation: tick-in .7s cubic-bezier(.2,.8,.2,1) both; }
+@keyframes tick-in { from { opacity: 0; } to { opacity: 1; } }
 .gauge-num {
   position: absolute; inset: 0; display: grid; place-content: center; text-align: center;
 }
@@ -340,11 +359,24 @@ body[data-state="loading"] .btn-label { opacity: 0.85; }
   padding: 2px 8px; border-radius: 999px; margin-left: 4px; }
 
 /* Signature: cigarette-equivalent block */
-.cig { margin: 0 0 16px; padding: 14px 16px; border-radius: 14px;
-  background: var(--accent-tint); border: 1px solid var(--line); }
+.cig { margin: 0 0 16px; padding: 16px 18px; border-radius: 16px;
+  background: linear-gradient(135deg, var(--accent-tint), color-mix(in srgb, var(--accent) 4%, var(--card)));
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line)); }
+.cig-main { display: flex; align-items: center; gap: 13px; }
+.cig-ico { font-size: 1.8rem; line-height: 1; flex: 0 0 auto; }
+.cig-body { flex: 1 1 auto; min-width: 0; }
 .cig-head { font-family: "Fraunces", serif; font-size: 1.12rem; font-weight: 600; }
-.cig-head b { color: var(--teal-deep); }
+.cig-head b { font-size: 1.5em; color: var(--teal-deep); }
 .cig-week { margin-top: 4px; font-size: 0.86rem; color: var(--ink-soft); }
+.cig-share {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px;
+  font: inherit; font-size: 0.82rem; font-weight: 700; color: #fff; cursor: pointer;
+  background: var(--accent); border: none; padding: 8px 13px; border-radius: 999px;
+  box-shadow: var(--shadow-sm); transition: transform .15s ease, filter .15s ease;
+}
+.cig-share:hover { transform: translateY(-1px); filter: brightness(1.05); }
+.cig-share svg { width: 15px; height: 15px; fill: none; stroke: #fff; stroke-width: 2;
+  stroke-linejoin: round; stroke-linecap: round; }
 
 /* "Why is the air like this?" + indoor strategy */
 .why { margin: 0 0 14px; color: var(--ink); font-size: 0.96rem; }
@@ -381,12 +413,37 @@ body[data-state="loading"] .btn-label { opacity: 0.85; }
 .trust ul { margin: 10px 0 0; padding-left: 18px; display: grid; gap: 6px; }
 .trust li { font-size: 0.8rem; }
 
+/* V6: staggered reveal of result sections */
+.reveal { animation: reveal-in .5s cubic-bezier(.2,.8,.2,1) both;
+  animation-delay: calc(var(--i, 0) * 55ms); }
+@keyframes reveal-in { from { opacity: 0; transform: translateY(9px); } to { opacity: 1; transform: none; } }
+
+/* V6: shimmering skeleton while live data loads */
+.skeleton .sk {
+  background: linear-gradient(90deg,
+    var(--paper-2) 25%, color-mix(in srgb, var(--accent) 10%, var(--paper-2)) 37%, var(--paper-2) 63%);
+  background-size: 400% 100%; border-radius: 9px; animation: shimmer 1.4s ease infinite;
+}
+.skeleton .sk-gauge { width: 116px; height: 116px; border-radius: 50%; flex: 0 0 auto; }
+.skeleton .sk-head { flex: 1 1 auto; display: grid; gap: 11px; align-content: center; }
+.skeleton .sk-line { height: 13px; }
+.skeleton .w40 { width: 40%; } .skeleton .w60 { width: 60%; } .skeleton .w70 { width: 70%; }
+.skeleton .w80 { width: 80%; } .skeleton .w90 { width: 90%; }
+.skeleton .sk-pill { width: 96px; height: 24px; border-radius: 999px; }
+.skeleton .sk-block { height: 66px; border-radius: 14px; margin: 16px 0; }
+.skeleton .sk-bars { height: 130px; border-radius: 10px; margin-top: 14px; }
+.skeleton .card-body { display: grid; gap: 12px; }
+@keyframes shimmer { from { background-position: 100% 0; } to { background-position: 0 0; } }
+
 .error-card {
   background: var(--card); border: 1px solid var(--line); border-left: 5px solid var(--aqi-unhealthy);
-  border-radius: 16px; padding: 22px 24px; box-shadow: var(--shadow-sm);
+  border-radius: 16px; padding: 24px 26px; box-shadow: var(--shadow-sm);
   animation: card-in .4s ease both;
 }
-.error-card h3 { margin: 0 0 6px; font-family: "Fraunces", serif; color: #8a2b29; }
+.error-card .err-ico { width: 34px; height: 34px; display: grid; place-items: center;
+  border-radius: 50%; background: color-mix(in srgb, var(--aqi-unhealthy) 16%, transparent);
+  font-size: 1.1rem; margin-bottom: 10px; }
+.error-card h3 { margin: 0 0 6px; font-family: "Fraunces", serif; color: var(--aqi-unhealthy); }
 .error-card p { margin: 0; color: var(--ink-soft); }
 
 /* ---------- Sections ---------- */
@@ -400,7 +457,10 @@ section.who, section.how { max-width: 1180px; margin: 0 auto; padding: clamp(40p
 .who-grid li { background: var(--card); border: 1px solid var(--line); border-radius: 18px;
   padding: 24px; box-shadow: var(--shadow-sm); transition: transform .2s ease, box-shadow .2s ease; }
 .who-grid li:hover { transform: translateY(-4px); box-shadow: var(--shadow); }
-.who-ico { font-size: 1.7rem; }
+.who-ico { display: inline-grid; place-items: center; width: 48px; height: 48px;
+  border-radius: 14px; background: var(--accent-tint); }
+.who-ico svg { width: 27px; height: 27px; fill: none; stroke: var(--teal-deep);
+  stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .who-grid h3 { font-family: "Fraunces", serif; font-weight: 600; margin: 12px 0 6px; font-size: 1.15rem; }
 .who-grid p { margin: 0; color: var(--ink-soft); font-size: 0.95rem; }
 
@@ -477,6 +537,7 @@ section.who, section.how { max-width: 1180px; margin: 0 auto; padding: clamp(40p
   </script>
 </head>
 <body data-state="idle">
+  <div class="haze" aria-hidden="true"></div>
   <div class="air-field" aria-hidden="true">
     <span></span><span></span><span></span><span></span><span></span>
     <span></span><span></span><span></span><span></span><span></span>
@@ -560,12 +621,30 @@ section.who, section.how { max-width: 1180px; margin: 0 auto; padding: clamp(40p
       <h2 class="section-title">Built for the people air hits hardest</h2>
       <p class="section-sub">Smoke and smog aren't equal-opportunity. These groups get protective advice sooner.</p>
       <ul class="who-grid">
-        <li><span class="who-ico">🫁</span><h3>Asthma &amp; COPD</h3><p>Fine-particle smoke can trigger attacks well before the air looks "bad".</p></li>
-        <li><span class="who-ico">❤️</span><h3>Heart conditions</h3><p>Pollution stresses the cardiovascular system, raising real risk.</p></li>
-        <li><span class="who-ico">👶</span><h3>Children</h3><p>Smaller, developing lungs take in more air per kilo of body weight.</p></li>
-        <li><span class="who-ico">🤰</span><h3>Pregnancy</h3><p>Exposure is linked to outcomes for both parent and baby.</p></li>
-        <li><span class="who-ico">🧓</span><h3>Older adults</h3><p>Reduced lung reserve makes poor air more dangerous.</p></li>
-        <li><span class="who-ico">👷</span><h3>Outdoor workers</h3><p>Hours of exertion outside multiply every exposure.</p></li>
+        <li>
+          <span class="who-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 4v7"/><path d="M12 9c-1.2-1.7-3.7-1.5-3.7 1.3 0 2.2-1.6 3-1.6 5.8 0 2.3 1.1 3.4 2.8 3.4 1.4 0 2.5-1 2.5-2.6Z"/><path d="M12 9c1.2-1.7 3.7-1.5 3.7 1.3 0 2.2 1.6 3 1.6 5.8 0 2.3-1.1 3.4-2.8 3.4-1.4 0-2.5-1-2.5-2.6Z"/></svg></span>
+          <h3>Asthma &amp; COPD</h3><p>Fine-particle smoke can trigger attacks well before the air looks "bad".</p>
+        </li>
+        <li>
+          <span class="who-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 20C12 20 4 14.8 4 9.3 4 6.4 6 5 8 5c1.8 0 3.3 1.2 4 2.5C12.7 6.2 14.2 5 16 5c2 0 4 1.4 4 4.3 0 5.5-8 10.7-8 10.7Z"/></svg></span>
+          <h3>Heart conditions</h3><p>Pollution stresses the cardiovascular system, raising real risk.</p>
+        </li>
+        <li>
+          <span class="who-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="6" r="2.4"/><path d="M12 8.6v6.4"/><path d="M8.4 11.4h7.2"/><path d="M12 15l-2.4 4M12 15l2.4 4"/></svg></span>
+          <h3>Children</h3><p>Smaller, developing lungs take in more air per kilo of body weight.</p>
+        </li>
+        <li>
+          <span class="who-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="10.5" cy="5" r="2.2"/><path d="M10.5 7.2c-1.1 1.4-1.2 3.6-1.2 5.6 0 3 .4 4.6.4 6.6"/><path d="M9.6 9.4c2.4 0 4.3 1.5 4.3 3.6 0 2-1.9 3.3-4.3 3.3"/></svg></span>
+          <h3>Pregnancy</h3><p>Exposure is linked to outcomes for both parent and baby.</p>
+        </li>
+        <li>
+          <span class="who-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="10" cy="5" r="2.2"/><path d="M10 7.2c-.3 2-1 3-1 5l1 6.8"/><path d="M9.4 12.4 13 12"/><path d="M14 9.5V20"/></svg></span>
+          <h3>Older adults</h3><p>Reduced lung reserve makes poor air more dangerous.</p>
+        </li>
+        <li>
+          <span class="who-ico" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 16.5h16"/><path d="M6.5 16.5v-1.2a5.5 5.5 0 0 1 11 0v1.2"/><path d="M9.2 10.5h5.6"/><path d="M12 9.8V6"/></svg></span>
+          <h3>Outdoor workers</h3><p>Hours of exertion outside multiply every exposure.</p>
+        </li>
       </ul>
     </section>
 
@@ -1106,10 +1185,58 @@ const resultEl = document.getElementById("result");
 const locInput = document.getElementById("location");
 const groupSelect = document.getElementById("group");
 
+// V1 atmospheric system: how thick/smoky the ambient layer feels, per category.
+// Clean air → ~0 (crisp); hazardous → ~0.8 (a heavy haze creeps in at the edges).
+const CATEGORY_HAZE = {
+  "Good": 0, "Moderate": 0.14, "Unhealthy for Sensitive Groups": 0.28,
+  "Unhealthy": 0.45, "Very Unhealthy": 0.62, "Hazardous": 0.8,
+};
+
 function setAccent(cat) {
   const [accent, tint] = CATEGORY_ACCENT[cat] || CATEGORY_ACCENT["Good"];
-  document.documentElement.style.setProperty("--accent", accent);
-  document.documentElement.style.setProperty("--accent-tint", tint);
+  const root = document.documentElement.style;
+  root.setProperty("--accent", accent);
+  root.setProperty("--accent-tint", tint);
+  // The whole interface "breathes with the air": drive the ambient haze and a
+  // category slug the background/particle layers react to.
+  root.setProperty("--haze", String(CATEGORY_HAZE[cat] ?? 0));
+  document.body.dataset.air = (cat || "Good").toLowerCase().replace(/[^a-z]+/g, "-");
+}
+
+// Order of US EPA categories, used to place the gauge tick along the dial.
+const CATEGORY_ORDER = [
+  "Good", "Moderate", "Unhealthy for Sensitive Groups",
+  "Unhealthy", "Very Unhealthy", "Hazardous",
+];
+const CATEGORY_BOUNDS = [0, 50, 100, 150, 200, 300, 500];
+
+// V2: angle (deg, clockwise from top) where this AQI lands on the 6-segment
+// scale dial — each category occupies an equal 60° arc, interpolated within.
+function gaugeTickAngle(aqi, category) {
+  let i = CATEGORY_ORDER.indexOf(category);
+  if (i < 0) i = 0;
+  const lo = CATEGORY_BOUNDS[i];
+  const hi = CATEGORY_BOUNDS[i + 1];
+  const frac = Math.max(0, Math.min(1, (aqi - lo) / (hi - lo)));
+  return ((i + frac) / 6) * 360;
+}
+
+const prefersReducedMotion = () =>
+  window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// V2: animate the big AQI number counting up from 0.
+function countUp(el, target) {
+  if (!el) return;
+  if (prefersReducedMotion()) { el.textContent = String(target); return; }
+  const dur = 900;
+  const start = performance.now();
+  function step(now) {
+    const t = Math.min(1, (now - start) / dur);
+    const eased = 1 - Math.pow(1 - t, 3);
+    el.textContent = String(Math.round(target * eased));
+    if (t < 1) requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
 }
 
 function esc(s) {
@@ -1127,14 +1254,28 @@ function placeholder() {
 }
 
 function renderError(msg) {
-  resultEl.innerHTML = `<div class="error-card"><h3>Hmm.</h3><p>${esc(msg)}</p></div>`;
+  resultEl.innerHTML = `<div class="error-card">
+    <div class="err-ico" aria-hidden="true">⚠️</div>
+    <h3>Hmm, that didn't work</h3><p>${esc(msg)}</p></div>`;
 }
 
-function ringDash(aqi) {
+// V2: a radial dial whose ring shows the whole Good→Hazardous scale as six
+// coloured segments, with a tick marking where this reading lands.
+function gaugeSvg(aqi, category) {
   const R = 52;
   const c = 2 * Math.PI * R;
-  const frac = Math.max(0.04, Math.min(1, aqi / 300));
-  return { c, offset: c * (1 - frac) };
+  const seg = c / 6;
+  const gap = 7;
+  const segs = CATEGORY_ORDER.map((cat, i) => {
+    const col = CATEGORY_ACCENT[cat][0];
+    return `<circle class="seg" cx="60" cy="60" r="${R}" stroke="${col}"
+      stroke-dasharray="${(seg - gap).toFixed(1)} ${(c - seg + gap).toFixed(1)}"
+      stroke-dashoffset="${(-i * seg).toFixed(1)}"></circle>`;
+  }).join("");
+  const angle = gaugeTickAngle(aqi, category);
+  const tick = `<line class="tick" x1="103" y1="60" x2="121" y2="60"
+      transform="rotate(${angle.toFixed(1)} 60 60)"></line>`;
+  return `<svg viewBox="0 0 120 120" class="dial">${segs}${tick}</svg>`;
 }
 
 function groupLabel(g) {
@@ -1190,8 +1331,18 @@ function cigaretteBlock(d) {
     : "";
   return `
     <div class="cig">
-      <div class="cig-head">🚬 Today's air ≈ <b>${n}</b> cigarette${n === 1 ? "" : "s"}</div>
-      ${weekLine}
+      <div class="cig-main">
+        <span class="cig-ico" aria-hidden="true">🚬</span>
+        <div class="cig-body">
+          <div class="cig-head">Today's air ≈ <b>${n}</b> cigarette${n === 1 ? "" : "s"}</div>
+          ${weekLine}
+        </div>
+        <button class="cig-share" type="button" aria-label="Share this as an image"
+          data-cig="${n}" data-loc="${esc(d.location || "")}" data-aqi="${d.aqi}" data-cat="${esc(d.category)}">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 9V5l7 7-7 7v-4C7 12 5 16 4 20c0-7 3-11 10-11Z"/></svg>
+          Share
+        </button>
+      </div>
       <details class="more">
         <summary>What does this mean?</summary>
         <p>Based on the Berkeley Earth equivalence: breathing about 22 µg/m³ of PM2.5
@@ -1201,9 +1352,74 @@ function cigaretteBlock(d) {
     </div>`;
 }
 
+// V3: render the cigarette stat as a shareable square image (no tracking; the
+// image is built locally and handed to the OS share sheet or downloaded).
+function fitFont(ctx, text, weight, family, startPx, maxWidth) {
+  let px = startPx;
+  do {
+    ctx.font = `${weight} ${px}px ${family}`;
+    if (ctx.measureText(text).width <= maxWidth) break;
+    px -= 6;
+  } while (px > 24);
+  return px;
+}
+
+async function shareCigarette(btn) {
+  const { cig, loc, aqi, cat } = btn.dataset;
+  if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch (e) { /* ignore */ } }
+  const W = 1080;
+  const canvas = document.createElement("canvas");
+  canvas.width = W; canvas.height = W;
+  const ctx = canvas.getContext("2d");
+  const accent = (CATEGORY_ACCENT[cat] || CATEGORY_ACCENT["Good"])[0];
+  const g = ctx.createLinearGradient(0, 0, W, W);
+  g.addColorStop(0, "#0b6f6b"); g.addColorStop(1, accent);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, W);
+  ctx.textAlign = "center"; ctx.fillStyle = "#fff";
+  const serif = "'Fraunces', Georgia, serif";
+  const sans = "'Hanken Grotesk', system-ui, sans-serif";
+
+  ctx.globalAlpha = 0.92;
+  ctx.font = `600 48px ${sans}`;
+  ctx.fillText("Today’s air in", W / 2, 250);
+  const locPx = fitFont(ctx, loc, "700", serif, 76, W - 160);
+  ctx.font = `700 ${locPx}px ${serif}`;
+  ctx.fillText(loc, W / 2, 250 + locPx + 18);
+
+  ctx.globalAlpha = 1;
+  ctx.font = `700 260px ${serif}`;
+  ctx.fillText(`≈ ${cig}`, W / 2, 650);
+  ctx.font = `600 54px ${sans}`;
+  ctx.fillText(`cigarette${cig === "1" ? "" : "s"} of harm today`, W / 2, 730);
+  ctx.globalAlpha = 0.9;
+  ctx.font = `500 44px ${sans}`;
+  ctx.fillText(`US AQI ${aqi} · ${cat}`, W / 2, 820);
+
+  ctx.globalAlpha = 1;
+  ctx.font = `700 50px ${serif}`;
+  ctx.fillText("AirAware", W / 2, 965);
+  ctx.globalAlpha = 0.85;
+  ctx.font = `400 33px ${sans}`;
+  ctx.fillText("softbrowndog.github.io/AirAware", W / 2, 1015);
+
+  const blob = await new Promise((res) => canvas.toBlob(res, "image/png"));
+  if (!blob) return;
+  const file = new File([blob], "airaware.png", { type: "image/png" });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: "AirAware",
+        text: `Today’s air ≈ ${cig} cigarettes of harm.` });
+      return;
+    } catch (e) { /* user cancelled or unsupported — fall through to download */ }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = "airaware.png"; a.click();
+  URL.revokeObjectURL(url);
+}
+
 function renderResult(d) {
   setAccent(d.category);
-  const { c, offset } = ringDash(d.aqi);
   const maskTag = d.wear_mask ? `<span class="tag mask">😷 Wear an N95 outdoors</span>` : "";
   const domTag = d.dominant_pollutant ? `<span class="tag"><span class="dot"></span>${esc(d.dominant_pollutant)}</span>` : "";
   const peakTag = d.peak_window ? `<span class="tag">⏱ Worst ${esc(d.peak_window)}</span>` : "";
@@ -1245,12 +1461,8 @@ function renderResult(d) {
     <article class="card">
       <div class="card-top">
         <div class="gauge">
-          <svg viewBox="0 0 120 120">
-            <circle class="track" cx="60" cy="60" r="52"></circle>
-            <circle class="value" cx="60" cy="60" r="52"
-              stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${c.toFixed(1)}"></circle>
-          </svg>
-          <div class="gauge-num"><b>${d.aqi}</b><small>US AQI</small></div>
+          ${gaugeSvg(d.aqi, d.category)}
+          <div class="gauge-num"><b class="aqi-count">0</b><small>US AQI</small></div>
         </div>
         <div class="card-head">
           <h2>${esc(d.location)}</h2>
@@ -1259,13 +1471,13 @@ function renderResult(d) {
         </div>
       </div>
       <div class="card-body">
-        <p class="headline">${esc(d.headline)}</p>
-        <p class="action">${esc(d.action)}</p>
-        ${cigaretteBlock(d)}
-        ${whyBlock}
-        ${windowsBlock}
-        <div class="meta">${maskTag}${domTag}${peakTag}${bestTag}${whoTag}</div>
-        ${pollutantBars(d.pollutants)}
+        <p class="headline reveal" style="--i:0">${esc(d.headline)}</p>
+        <p class="action reveal" style="--i:1">${esc(d.action)}</p>
+        <div class="reveal" style="--i:2">${cigaretteBlock(d)}</div>
+        <div class="reveal" style="--i:3">${whyBlock}</div>
+        <div class="reveal" style="--i:4">${windowsBlock}</div>
+        <div class="meta reveal" style="--i:5">${maskTag}${domTag}${peakTag}${bestTag}${whoTag}</div>
+        <div class="reveal" style="--i:6">${pollutantBars(d.pollutants)}</div>
       </div>
       <div class="card-foot">
         ${trustBlock}
@@ -1273,16 +1485,37 @@ function renderResult(d) {
       </div>
     </article>`;
 
-  requestAnimationFrame(() => {
-    const v = resultEl.querySelector(".gauge .value");
-    if (v) v.style.strokeDashoffset = offset.toFixed(1);
-  });
+  requestAnimationFrame(() => countUp(resultEl.querySelector(".aqi-count"), d.aqi));
 }
 
 // ---------- flows ----------
 
+// V6: a shimmering skeleton of the result card while live data loads, so the
+// layout settles instead of jumping in from a blank panel.
+function skeleton() {
+  resultEl.innerHTML = `
+    <article class="card skeleton" aria-hidden="true">
+      <div class="card-top">
+        <div class="sk sk-gauge"></div>
+        <div class="sk-head">
+          <div class="sk sk-line w60"></div>
+          <div class="sk sk-line w40"></div>
+          <div class="sk sk-pill"></div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="sk sk-line w80"></div>
+        <div class="sk sk-line w90"></div>
+        <div class="sk sk-block"></div>
+        <div class="sk sk-line w70"></div>
+        <div class="sk sk-bars"></div>
+      </div>
+    </article>`;
+}
+
 async function withLoading(fn) {
   document.body.dataset.state = "loading";
+  skeleton();
   try {
     renderResult(await fn());
   } catch (e) {
@@ -1362,6 +1595,13 @@ document.querySelectorAll(".chip").forEach((chip) => {
     check(chip.dataset.loc, chip.dataset.group);
     document.querySelector(".hero-result").scrollIntoView({ behavior: "smooth", block: "nearest" });
   });
+});
+
+// One delegated handler for the cigarette "Share" button (the card markup is
+// re-rendered on every check, so we listen on the stable container).
+resultEl.addEventListener("click", (e) => {
+  const btn = e.target.closest(".cig-share");
+  if (btn) shareCigarette(btn);
 });
 
 placeholder();
