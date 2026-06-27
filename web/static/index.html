@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AirAware — Is it safe to breathe today?</title>
+  <meta name="description" content="Personalized, plain-language air-quality advice for the people smoke and smog hurt most. Free, no sign-up." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,9..144,700&family=Hanken+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%230ea5a0'/%3E%3Cpath d='M6 18c5 0 5-4 10-4s5 4 10 4' stroke='white' stroke-width='2.4' fill='none' stroke-linecap='round'/%3E%3C/svg%3E" />
+</head>
+<body data-state="idle">
+  <div class="air-field" aria-hidden="true">
+    <span></span><span></span><span></span><span></span><span></span>
+    <span></span><span></span><span></span><span></span><span></span>
+  </div>
+
+  <header class="site-header">
+    <a class="brand" href="/">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="14"/><path d="M6 18c5 0 5-4 10-4s5 4 10 4"/></svg>
+      </span>
+      <span class="brand-name">AirAware</span>
+    </a>
+    <nav class="site-nav">
+      <a href="#who">Who it's for</a>
+      <a href="#how">How it works</a>
+      <a href="#trust">Data</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Free · No sign-up · Open data</p>
+        <h1 class="display">Is it safe to<br /><em>breathe</em> today?</h1>
+        <p class="lede">
+          Air-quality numbers are everywhere. Clear answers aren't. AirAware tells
+          you what today's air means <strong>for you</strong> — and what to do
+          about it.
+        </p>
+
+        <form id="check-form" class="checker" autocomplete="off">
+          <div class="field field--place">
+            <label for="location">Your location</label>
+            <input id="location" name="location" type="text"
+                   placeholder="e.g. Fresno, CA" required />
+          </div>
+          <div class="field field--group">
+            <label for="group">Who is this for?</label>
+            <select id="group" name="group">
+              <option value="general">General public</option>
+              <option value="respiratory">Asthma / COPD</option>
+              <option value="heart">Heart condition</option>
+              <option value="older_adult">Older adult</option>
+              <option value="pregnant">Pregnant</option>
+              <option value="child">Child</option>
+              <option value="outdoor_worker">Outdoor worker</option>
+            </select>
+          </div>
+          <button type="submit" class="btn-check">
+            <span class="btn-label">Check air</span>
+            <span class="btn-spin" aria-hidden="true"></span>
+          </button>
+        </form>
+
+        <div class="locate-row">
+          <button id="locate" class="btn-locate" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true" class="loc-ico">
+              <circle cx="12" cy="12" r="3.2"></circle>
+              <path d="M12 2v3M12 19v3M2 12h3M19 12h3"></path>
+              <circle cx="12" cy="12" r="7.4" class="loc-ring"></circle>
+            </svg>
+            <span class="locate-label">Use my location</span>
+          </button>
+          <span class="locate-hint" id="locate-hint"></span>
+        </div>
+
+        <div class="quick">
+          <span>Try:</span>
+          <button class="chip" data-loc="Los Angeles" data-group="respiratory">Los Angeles · asthma</button>
+          <button class="chip" data-loc="Delhi" data-group="child">Delhi · child</button>
+          <button class="chip" data-loc="London" data-group="general">London</button>
+        </div>
+      </div>
+
+      <div class="hero-result" id="result" aria-live="polite">
+        <!-- The result card and placeholder are rendered here by app.js -->
+      </div>
+    </section>
+
+    <section class="who" id="who">
+      <h2 class="section-title">Built for the people air hits hardest</h2>
+      <p class="section-sub">Smoke and smog aren't equal-opportunity. These groups get protective advice sooner.</p>
+      <ul class="who-grid">
+        <li><span class="who-ico">🫁</span><h3>Asthma &amp; COPD</h3><p>Fine-particle smoke can trigger attacks well before the air looks "bad".</p></li>
+        <li><span class="who-ico">❤️</span><h3>Heart conditions</h3><p>Pollution stresses the cardiovascular system, raising real risk.</p></li>
+        <li><span class="who-ico">👶</span><h3>Children</h3><p>Smaller, developing lungs take in more air per kilo of body weight.</p></li>
+        <li><span class="who-ico">🤰</span><h3>Pregnancy</h3><p>Exposure is linked to outcomes for both parent and baby.</p></li>
+        <li><span class="who-ico">🧓</span><h3>Older adults</h3><p>Reduced lung reserve makes poor air more dangerous.</p></li>
+        <li><span class="who-ico">👷</span><h3>Outdoor workers</h3><p>Hours of exertion outside multiply every exposure.</p></li>
+      </ul>
+    </section>
+
+    <section class="how" id="how">
+      <h2 class="section-title">From a place name to a plan</h2>
+      <ol class="steps">
+        <li><span class="step-n">01</span><h3>Tell us where &amp; who</h3><p>A location and, optionally, the person it's for.</p></li>
+        <li><span class="step-n">02</span><h3>We read the live air</h3><p>Real-time pollutants and the US AQI from open monitoring data.</p></li>
+        <li><span class="step-n">03</span><h3>You get a clear answer</h3><p>Plain-language advice, mask guidance, and the worst window to avoid.</p></li>
+      </ol>
+    </section>
+  </main>
+
+  <footer class="site-footer" id="trust">
+    <div class="foot-main">
+      <div class="brand brand--foot">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="14"/><path d="M6 18c5 0 5-4 10-4s5 4 10 4"/></svg>
+        </span>
+        <span class="brand-name">AirAware</span>
+      </div>
+      <p class="foot-note">
+        A public-good project. Free to use, open data, no tracking. Air quality
+        and geocoding from <a href="https://open-meteo.com/" rel="noopener" target="_blank">Open-Meteo</a>;
+        guidance follows US EPA AQI categories.
+      </p>
+    </div>
+    <p class="disclaimer">
+      AirAware is informational and not a substitute for medical advice. If you
+      have symptoms, follow your care plan or seek medical help.
+    </p>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>
