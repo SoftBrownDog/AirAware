@@ -1,0 +1,17 @@
+{
+  "name": "AirAware — Is it safe to breathe today?",
+  "short_name": "AirAware",
+  "description": "Personalized, plain-language air-quality advice for the people smoke and smog hurt most. Free, no sign-up, open data.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f3f7f5",
+  "theme_color": "#0ea5a0",
+  "lang": "en",
+  "categories": ["health", "weather", "utilities"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

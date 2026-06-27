@@ -15,6 +15,7 @@ import sys
 from .advice import KNOWN_GROUPS, POLLUTANT_NAMES, advise
 from .data import air_quality, geocode, reverse_geocode
 from .data import _dominant
+from .regional import regional_index, who_pm25_multiple
 
 
 def _build(place, group: str) -> dict:
@@ -22,6 +23,7 @@ def _build(place, group: str) -> dict:
     # Group-aware "main concern": the pollutant this group is most vulnerable to.
     dom_key = _dominant(reading.pollutants, group)
     dom = POLLUTANT_NAMES.get(dom_key, dom_key)
+    ri = regional_index(reading.pollutants, place.country)
     a = advise(
         reading.aqi,
         group=group,
@@ -31,6 +33,8 @@ def _build(place, group: str) -> dict:
         cause=reading.cause,
         cigarettes=reading.cigarettes,
         trend=reading.trend,
+        who_pm25=who_pm25_multiple(reading.pollutants.get("pm2_5")),
+        regional=ri.__dict__ if ri else None,
     )
     return {"place": place, "reading": reading, "advice": a}
 

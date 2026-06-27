@@ -120,6 +120,8 @@ class Advice:
     cause: str | None = None  # cause key (see CAUSE_TEXT)
     cigarettes: float | None = None  # daily cigarette-equivalent
     windows: str | None = None  # open/close-the-windows recommendation
+    who_pm25: float | None = None  # PM2.5 as a multiple of the WHO 24-h guideline
+    regional: dict | None = None  # locale index {system,value,label,scale,source}
 
     @property
     def cause_text(self) -> str | None:
@@ -146,6 +148,13 @@ class Advice:
             lines.append(f"Worst window today: {self.peak_window} — plan around it.")
         if self.best_window:
             lines.append(f"Cleanest window: {self.best_window} — a good time to go out.")
+        if self.who_pm25:
+            lines.append(f"PM2.5 is {self.who_pm25}× the WHO 24-hour guideline.")
+        if self.regional:
+            lines.append(
+                f"{self.regional['system']}: {self.regional['value']} "
+                f"({self.regional['label']})."
+            )
         return "\n".join(lines)
 
 
@@ -158,6 +167,8 @@ def advise(
     cause: str | None = None,
     cigarettes: float | None = None,
     trend: str | None = None,
+    who_pm25: float | None = None,
+    regional: dict | None = None,
 ) -> Advice:
     """Build personalized advice from an AQI value and a sensitivity group."""
     risk = personal_risk(aqi, group)
@@ -180,6 +191,8 @@ def advise(
         cause=cause,
         cigarettes=cigarettes,
         windows=window_advice(aqi, trend),
+        who_pm25=who_pm25,
+        regional=regional,
     )
 
 

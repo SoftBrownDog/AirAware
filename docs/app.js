@@ -309,6 +309,101 @@ async function airQuality(lat, lon) {
   };
 }
 
+// ---------- WHO context + regional indices (mirrors regional.py) ----------
+
+const WHO_PM25_24H = 15; // µg/m³
+
+function whoPm25Multiple(pm25) {
+  if (pm25 == null || pm25 < 0) return null;
+  return Math.round((pm25 / WHO_PM25_24H) * 10) / 10;
+}
+
+const EAQI_LEVELS = ["Good", "Fair", "Moderate", "Poor", "Very poor", "Extremely poor"];
+const EAQI_BANDS = {
+  pm2_5: [10, 20, 25, 50, 75], pm10: [20, 40, 50, 100, 150],
+  nitrogen_dioxide: [40, 90, 120, 230, 340], ozone: [50, 100, 130, 240, 380],
+  sulphur_dioxide: [100, 200, 350, 500, 750],
+};
+const DAQI_BANDS = {
+  pm2_5: [11, 23, 35, 41, 47, 53, 58, 64, 70], pm10: [16, 33, 50, 58, 66, 75, 83, 91, 100],
+  ozone: [33, 66, 100, 120, 140, 160, 187, 213, 240],
+  nitrogen_dioxide: [67, 134, 200, 267, 334, 400, 467, 534, 600],
+  sulphur_dioxide: [88, 177, 266, 354, 443, 532, 710, 887, 1064],
+};
+// India NAQI breakpoints: [C_lo, C_hi, I_lo, I_hi]; CO in mg/m³.
+const NAQI_BP = {
+  pm2_5: [[0, 30, 0, 50], [31, 60, 51, 100], [61, 90, 101, 200], [91, 120, 201, 300], [121, 250, 301, 400], [251, 500, 401, 500]],
+  pm10: [[0, 50, 0, 50], [51, 100, 51, 100], [101, 250, 101, 200], [251, 350, 201, 300], [351, 430, 301, 400], [431, 600, 401, 500]],
+  nitrogen_dioxide: [[0, 40, 0, 50], [41, 80, 51, 100], [81, 180, 101, 200], [181, 280, 201, 300], [281, 400, 301, 400], [401, 800, 401, 500]],
+  ozone: [[0, 50, 0, 50], [51, 100, 51, 100], [101, 168, 101, 200], [169, 208, 201, 300], [209, 748, 301, 400], [749, 1000, 401, 500]],
+  sulphur_dioxide: [[0, 40, 0, 50], [41, 80, 51, 100], [81, 380, 101, 200], [381, 800, 201, 300], [801, 1600, 301, 400], [1601, 2000, 401, 500]],
+  carbon_monoxide: [[0, 1, 0, 50], [1.1, 2, 51, 100], [2.1, 10, 101, 200], [10.1, 17, 201, 300], [17.1, 34, 301, 400], [34.1, 50, 401, 500]],
+};
+const NAQI_CATS = [[50, "Good"], [100, "Satisfactory"], [200, "Moderate"], [300, "Poor"], [400, "Very Poor"], [500, "Severe"]];
+const EU_EEA = new Set(["AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR",
+  "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE", "IS", "LI", "NO"]);
+
+function bandIndex(value, uppers) {
+  for (let i = 0; i < uppers.length; i++) if (value <= uppers[i]) return i + 1;
+  return uppers.length + 1;
+}
+
+function worstSub(pollutants, bands) {
+  let worst = 0;
+  for (const k of Object.keys(bands)) {
+    if (pollutants[k] == null) continue;
+    worst = Math.max(worst, bandIndex(pollutants[k], bands[k]));
+  }
+  return worst || null;
+}
+
+function eaqi(p) {
+  const lvl = worstSub(p, EAQI_BANDS);
+  if (!lvl) return null;
+  const label = EAQI_LEVELS[lvl - 1];
+  return { system: "EU EAQI", value: label, label, scale: "Good→Extremely poor", source: "European Environment Agency" };
+}
+
+function daqiBand(i) { return i <= 3 ? "Low" : i <= 6 ? "Moderate" : i <= 9 ? "High" : "Very High"; }
+
+function daqi(p) {
+  const idx = worstSub(p, DAQI_BANDS);
+  if (!idx) return null;
+  return { system: "UK DAQI", value: String(idx), label: daqiBand(idx), scale: "1–10", source: "UK Defra / COMEAP" };
+}
+
+function naqiSub(c, bps) {
+  for (const [clo, chi, ilo, ihi] of bps) {
+    if (c >= clo && c <= chi) return ilo + ((ihi - ilo) / (chi - clo)) * (c - clo);
+  }
+  return c > bps[bps.length - 1][1] ? 500 : null;
+}
+
+function naqiCategory(i) { for (const [u, l] of NAQI_CATS) if (i <= u) return l; return "Severe"; }
+
+function naqi(p) {
+  let worst = null;
+  for (const k of Object.keys(NAQI_BP)) {
+    let v = p[k];
+    if (v == null) continue;
+    if (k === "carbon_monoxide") v = v / 1000;
+    const s = naqiSub(v, NAQI_BP[k]);
+    if (s != null) worst = Math.max(worst == null ? -1 : worst, s);
+  }
+  if (worst == null) return null;
+  const idx = Math.round(worst);
+  return { system: "India NAQI", value: String(idx), label: naqiCategory(idx), scale: "0–500", source: "India CPCB" };
+}
+
+function regionalIndex(pollutants, countryCode) {
+  if (!countryCode) return null;
+  const cc = countryCode.toUpperCase();
+  if (cc === "GB") return daqi(pollutants);
+  if (cc === "IN") return naqi(pollutants);
+  if (EU_EEA.has(cc)) return eaqi(pollutants);
+  return null;
+}
+
 // ---------- advice model (mirrors advice.py) ----------
 
 const AQI_CATEGORIES = [
@@ -376,7 +471,12 @@ function advise(reading, group) {
 
 async function adviceForPlace(place, group) {
   const reading = await airQuality(place.latitude, place.longitude);
-  return { ...advise(reading, group), location: placeLabel(place) };
+  return {
+    ...advise(reading, group),
+    location: placeLabel(place),
+    who_pm25: whoPm25Multiple(reading.pollutants.pm2_5),
+    regional: regionalIndex(reading.pollutants, place.country),
+  };
 }
 
 // ---------- rendering ----------
@@ -503,8 +603,29 @@ function renderResult(d) {
   const domTag = d.dominant_pollutant ? `<span class="tag"><span class="dot"></span>${esc(d.dominant_pollutant)}</span>` : "";
   const peakTag = d.peak_window ? `<span class="tag">⏱ Worst ${esc(d.peak_window)}</span>` : "";
   const bestTag = d.best_window ? `<span class="tag good">🌿 Cleanest ${esc(d.best_window)}</span>` : "";
+  const whoTag = d.who_pm25
+    ? `<span class="tag">🌍 PM2.5 ${d.who_pm25}× WHO</span>` : "";
+  const regionalPill = d.regional
+    ? `<span class="regional-pill" title="${esc(d.regional.source)} · scale ${esc(d.regional.scale)}">${esc(d.regional.system)} ${esc(d.regional.value)} · ${esc(d.regional.label)}</span>` : "";
   const escNote = d.escalated
     ? `<span class="tuned-note">raised one level for you</span>` : "";
+  const obs = d.observed_at ? esc(d.observed_at.replace("T", " ")) : "—";
+  const idxLine = d.regional
+    ? `US EPA AQI (primary) + ${esc(d.regional.system)} for your country`
+    : "US EPA AQI categories";
+  const whyAdvice = d.escalated
+    ? "Risk is raised one band because sensitive groups should act sooner (US EPA guidance)."
+    : "Advice follows US EPA AQI category guidance.";
+  const trustBlock = `
+    <details class="trust">
+      <summary>Where this comes from</summary>
+      <ul>
+        <li><b>Observed:</b> ${obs} (local time)</li>
+        <li><b>Data:</b> live air quality &amp; geocoding from Open-Meteo — free, open, no tracking</li>
+        <li><b>Index:</b> ${idxLine}</li>
+        <li><b>Why this advice:</b> ${whyAdvice}</li>
+      </ul>
+    </details>`;
   const whyBlock = d.cause_text
     ? `<p class="why"><b>Why:</b> ${esc(d.cause_text)}</p>` : "";
   const windowsBlock = d.windows
@@ -529,7 +650,7 @@ function renderResult(d) {
         <div class="card-head">
           <h2>${esc(d.location)}</h2>
           <div class="place">Tuned for ${esc(groupLabel(d.group))} ${escNote}</div>
-          <span class="category-pill">${esc(d.category)}</span>
+          <div class="pills"><span class="category-pill">${esc(d.category)}</span>${regionalPill}</div>
         </div>
       </div>
       <div class="card-body">
@@ -538,10 +659,13 @@ function renderResult(d) {
         ${cigaretteBlock(d)}
         ${whyBlock}
         ${windowsBlock}
-        <div class="meta">${maskTag}${domTag}${peakTag}${bestTag}</div>
+        <div class="meta">${maskTag}${domTag}${peakTag}${bestTag}${whoTag}</div>
         ${pollutantBars(d.pollutants)}
       </div>
-      <div class="card-foot">Live reading${d.observed_at ? " · " + esc(d.observed_at.replace("T", " ")) : ""} · informational, not medical advice.</div>
+      <div class="card-foot">
+        ${trustBlock}
+        <p class="foot-disc">Informational, not a substitute for medical advice.</p>
+      </div>
     </article>`;
 
   requestAnimationFrame(() => {
@@ -636,3 +760,11 @@ document.querySelectorAll(".chip").forEach((chip) => {
 });
 
 placeholder();
+
+// Register the service worker for offline/installable use. Guarded so it's a
+// no-op where unsupported or when opened via file:// (e.g. standalone.html).
+if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  });
+}

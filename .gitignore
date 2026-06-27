@@ -3,3 +3,6 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 .DS_Store
+
+# Agent working files
+.agents_tmp/
