@@ -8,8 +8,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from airaware.data import (  # noqa: E402
     _attempts,
     _best_match,
+    _best_window,
     _dominant,
     _peak_window,
+    _trend,
+    classify_cause,
 )
 
 
@@ -93,3 +96,70 @@ def test_peak_window_reports_worst_hour():
     out = _peak_window(hourly)
     assert out is not None
     assert "18:00" in out
+
+
+# ---- Group-aware dominant pollutant (mild nudge) ----
+
+def test_dominant_group_nudge_reranks_when_close():
+    # Ozone is the raw leader, but PM2.5 is close — heart patients are nudged to PM2.5.
+    pollutants = {"pm2_5": 30.0, "ozone": 88.0}  # ratios ~0.857 vs ~0.88
+    assert _dominant(pollutants) == "ozone"               # general: raw leader
+    assert _dominant(pollutants, "heart") == "pm2_5"      # nudged
+    assert _dominant(pollutants, "respiratory") == "ozone"  # ozone-weighted group
+
+
+def test_dominant_group_nudge_never_suppresses_clear_leader():
+    # PM2.5 dominates by far; an ozone-weighted group must not flip to trace ozone.
+    pollutants = {"pm2_5": 100.0, "ozone": 10.0}
+    assert _dominant(pollutants, "respiratory") == "pm2_5"
+
+
+# ---- Cause classifier ----
+
+def test_classify_cause_by_dominant_pollutant():
+    assert classify_cause({"pm2_5": 80.0, "ozone": 10.0}) == "smoke"
+    assert classify_cause({"pm10": 200.0, "pm2_5": 5.0}) == "dust"
+    assert classify_cause({"ozone": 160.0, "pm2_5": 5.0}) == "ozone_smog"
+    assert classify_cause({"nitrogen_dioxide": 300.0}) == "traffic"
+    assert classify_cause({"sulphur_dioxide": 200.0}) == "industrial"
+    assert classify_cause({"carbon_monoxide": 30000.0}) == "combustion"
+    assert classify_cause({}) is None
+
+
+# ---- Best (cleanest) window ----
+
+def test_best_window_picks_cleanest_waking_hour():
+    hourly = {
+        "time": ["2026-06-26T05:00", "2026-06-26T06:00",
+                 "2026-06-26T07:00", "2026-06-26T15:00"],
+        "us_aqi": [10, 30, 35, 120],  # 05:00 is pre-dawn and excluded
+    }
+    out = _best_window(hourly, current_aqi=120)
+    assert out is not None
+    assert "06:00" in out and "today" in out
+
+
+def test_best_window_none_when_not_meaningfully_better():
+    hourly = {
+        "time": ["2026-06-26T06:00", "2026-06-26T15:00"],
+        "us_aqi": [30, 38],
+    }
+    assert _best_window(hourly, current_aqi=40) is None
+
+
+def test_best_window_labels_tomorrow():
+    hourly = {
+        "time": ["2026-06-26T15:00", "2026-06-27T07:00"],
+        "us_aqi": [150, 20],
+    }
+    out = _best_window(hourly, current_aqi=150)
+    assert out is not None and "tomorrow" in out
+
+
+# ---- Short-term trend ----
+
+def test_trend_rising_falling_steady():
+    assert _trend({"us_aqi": [50, 60, 70, 80]}, 50) == "rising"
+    assert _trend({"us_aqi": [80, 60, 50, 40]}, 80) == "falling"
+    assert _trend({"us_aqi": [50, 52, 55, 58]}, 50) == "steady"
+    assert _trend({"us_aqi": []}, 50) is None

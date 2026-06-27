@@ -14,7 +14,10 @@ import pytest  # noqa: E402
 from airaware.advice import (  # noqa: E402
     advise,
     aqi_category,
+    cigarettes_equivalent,
+    combined_risk,
     personal_risk,
+    window_advice,
 )
 
 
@@ -79,3 +82,63 @@ def test_json_serializable_fields():
     assert d["aqi"] == 120
     assert d["group"] == "heart"
     assert d["risk"] == "high"
+
+
+# ---- Cigarette-equivalent (Berkeley Earth: 22 µg/m³·day = 1 cigarette) ----
+
+def test_cigarettes_equivalent_ratio():
+    assert cigarettes_equivalent(22.0) == 1.0
+    assert cigarettes_equivalent(44.0) == 2.0
+    assert cigarettes_equivalent(11.0) == 0.5
+    assert cigarettes_equivalent(22.0, hours=12) == 0.5  # half a day
+    assert cigarettes_equivalent(None) == 0.0
+    assert cigarettes_equivalent(-5) == 0.0
+
+
+# ---- Open/close-the-windows advice ----
+
+def test_window_advice_opens_when_clean_closes_when_dirty():
+    assert "open the windows" in window_advice(40).lower()
+    assert "closed" in window_advice(160).lower()
+
+
+def test_window_advice_respects_trend():
+    assert "close up soon" in window_advice(40, "rising").lower()
+    assert "improving" in window_advice(160, "falling").lower()
+
+
+# ---- Household combined verdict ----
+
+def test_combined_risk_takes_most_vulnerable_member():
+    # At AQI 80, general is "low" but a respiratory member is "moderate".
+    risk, who = combined_risk(80, ["general", "respiratory"])
+    assert risk == "moderate"
+    assert who == "respiratory"
+
+
+def test_combined_risk_defaults_to_general():
+    assert combined_risk(80, []) == ("low", "general")
+
+
+# ---- Escalation flag surfaces personalization ----
+
+def test_escalated_flag_set_for_sensitive_group():
+    assert advise(80, "respiratory").escalated is True
+    assert advise(80, "general").escalated is False
+    # Capped at severe: no escalation beyond the top band.
+    assert advise(450, "older_adult").escalated is False
+
+
+def test_advise_threads_new_fields():
+    a = advise(
+        160, "respiratory",
+        dominant_pollutant="fine particles (PM2.5)",
+        best_window="tomorrow 07:00–10:00 (US AQI ~30)",
+        cause="smoke",
+        cigarettes=3.4,
+    )
+    text = a.to_text(location="Paradise, CA")
+    assert "3.4 cigarettes" in text
+    assert "smoke" in text.lower()
+    assert "Cleanest window" in text
+    assert a.cause_text is not None

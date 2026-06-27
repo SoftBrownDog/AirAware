@@ -14,16 +14,23 @@ import sys
 
 from .advice import KNOWN_GROUPS, POLLUTANT_NAMES, advise
 from .data import air_quality, geocode, reverse_geocode
+from .data import _dominant
 
 
 def _build(place, group: str) -> dict:
     reading = air_quality(place.latitude, place.longitude)
-    dom = POLLUTANT_NAMES.get(reading.dominant_pollutant, reading.dominant_pollutant)
+    # Group-aware "main concern": the pollutant this group is most vulnerable to.
+    dom_key = _dominant(reading.pollutants, group)
+    dom = POLLUTANT_NAMES.get(dom_key, dom_key)
     a = advise(
         reading.aqi,
         group=group,
         dominant_pollutant=dom,
         peak_window=reading.peak_window,
+        best_window=reading.best_window,
+        cause=reading.cause,
+        cigarettes=reading.cigarettes,
+        trend=reading.trend,
     )
     return {"place": place, "reading": reading, "advice": a}
 

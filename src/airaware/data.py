@@ -9,6 +9,7 @@ import json
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime
 
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 AIR_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
@@ -185,7 +186,11 @@ class AirReading:
     pollutants: dict[str, float]
     dominant_pollutant: str | None
     time: str
-    peak_window: str | None  # "HH:MM–HH:MM" of worst AQI in next 24h, if available
+    peak_window: str | None  # worst AQI window in next 24h, if elevated
+    best_window: str | None = None  # cleanest waking window over the forecast
+    cause: str | None = None  # plain-language cause key (see advice.CAUSE_TEXT)
+    cigarettes: float | None = None  # daily cigarette-equivalent from PM2.5
+    trend: str | None = None  # "rising" | "falling" | "steady" over next hours
 
 
 # Health-relevant reference concentrations (µg/m³): roughly the level at which
@@ -203,7 +208,33 @@ _CONCERN_REFERENCE = {
 }
 
 
-def _dominant(pollutants: dict[str, float]) -> str | None:
+# Per-group pollutant emphasis. A "mild nudge": when two pollutants are close
+# in health-normalized terms, prefer the one a given group is most vulnerable
+# to. Weights only re-rank among pollutants already near the raw leader (see
+# _NUDGE_THRESHOLD), so we never hide a genuinely dominant pollutant just
+# because it's "off-profile" for the group.
+GROUP_POLLUTANT_WEIGHTS = {
+    "respiratory": {"ozone": 1.30, "pm2_5": 1.25, "nitrogen_dioxide": 1.10},
+    "heart": {"pm2_5": 1.30, "carbon_monoxide": 1.20, "nitrogen_dioxide": 1.15},
+    "child": {"pm2_5": 1.30, "ozone": 1.20, "nitrogen_dioxide": 1.15},
+    "pregnant": {"pm2_5": 1.30, "carbon_monoxide": 1.20},
+    "older_adult": {"pm2_5": 1.30, "ozone": 1.15},
+    "outdoor_worker": {"ozone": 1.30, "pm2_5": 1.20},
+    "general": {},
+}
+
+# A pollutant is only eligible to be re-ranked by group weight if its raw
+# health-normalized ratio is within this fraction of the raw leader's.
+_NUDGE_THRESHOLD = 0.8
+
+
+def _dominant(pollutants: dict[str, float], group: str = "general") -> str | None:
+    """Most health-relevant pollutant, optionally nudged toward a group's profile.
+
+    With group="general" this is the pollutant with the largest value-to-reference
+    ratio. For a sensitive group, a pollutant that group is especially vulnerable
+    to can win *only if* it is already close to the raw leader (a mild nudge).
+    """
     scored = [
         (v / _CONCERN_REFERENCE.get(k, 100.0), k)
         for k, v in pollutants.items()
@@ -211,7 +242,36 @@ def _dominant(pollutants: dict[str, float]) -> str | None:
     ]
     if not scored:
         return None
-    return max(scored)[1]
+    raw_ratio, raw_leader = max(scored)
+    weights = GROUP_POLLUTANT_WEIGHTS.get(group) or {}
+    if not weights or raw_ratio <= 0:
+        return raw_leader
+    best, best_score = raw_leader, weights.get(raw_leader, 1.0) * raw_ratio
+    for ratio, k in scored:
+        if ratio >= _NUDGE_THRESHOLD * raw_ratio:
+            score = weights.get(k, 1.0) * ratio
+            if score > best_score:
+                best, best_score = k, score
+    return best
+
+
+def classify_cause(pollutants: dict[str, float]) -> str | None:
+    """Plain-language cause key for today's pollution, from the pollutant mix.
+
+    Heuristic and key-less (no external fire/weather feed). Returns a key into
+    advice.CAUSE_TEXT, or None when there's nothing to explain.
+    """
+    dom = _dominant(pollutants)
+    if dom is None:
+        return None
+    return {
+        "pm2_5": "smoke",
+        "pm10": "dust",
+        "ozone": "ozone_smog",
+        "nitrogen_dioxide": "traffic",
+        "sulphur_dioxide": "industrial",
+        "carbon_monoxide": "combustion",
+    }.get(dom, "mixed")
 
 
 def _peak_window(hourly: dict) -> str | None:
@@ -228,13 +288,70 @@ def _peak_window(hourly: dict) -> str | None:
     return f"around {hh} (US AQI ~{int(round(peak_aqi))})"
 
 
+def _day_label(when: str, ref: str) -> str:
+    """'today' / 'tomorrow' / weekday name for an ISO timestamp, vs a reference."""
+    try:
+        d = datetime.fromisoformat(when).date()
+        r = datetime.fromisoformat(ref).date()
+    except ValueError:
+        return ""
+    delta = (d - r).days
+    if delta <= 0:
+        return "today"
+    if delta == 1:
+        return "tomorrow"
+    return d.strftime("%a")
+
+
+def _best_window(hourly: dict, current_aqi: int | None = None) -> str | None:
+    """Cleanest 3-hour waking window across the forecast, if meaningfully better.
+
+    Scans waking hours (06:00–21:00). Returns a one-line recommendation, or None
+    when nothing is clearly cleaner than now (so we never nag pointlessly).
+    """
+    times = hourly.get("time") or []
+    aqis = hourly.get("us_aqi") or []
+    pairs = [(a, t) for a, t in zip(aqis, times) if a is not None]
+    waking = [(a, t) for a, t in pairs if 6 <= _hour_of(t) <= 21]
+    if not waking:
+        return None
+    best_aqi, best_t = min(waking, key=lambda x: x[0])
+    if current_aqi is not None and best_aqi >= current_aqi - 10:
+        return None
+    ref = times[0] if times else best_t
+    day = _day_label(best_t, ref)
+    h = _hour_of(best_t)
+    when = f"{day} {h:02d}:00–{min(h + 3, 24):02d}:00".strip()
+    return f"{when} (US AQI ~{int(round(best_aqi))})"
+
+
+def _hour_of(t: str) -> int:
+    try:
+        return int(t.split("T")[1].split(":")[0])
+    except (IndexError, ValueError):
+        return -1
+
+
+def _trend(hourly: dict, current_aqi: int | None) -> str | None:
+    """Short-term direction of AQI over the next few hours."""
+    aqis = [a for a in (hourly.get("us_aqi") or [])[:4] if a is not None]
+    if current_aqi is None or len(aqis) < 2:
+        return None
+    later = aqis[-1]
+    if later >= current_aqi + 15:
+        return "rising"
+    if later <= current_aqi - 15:
+        return "falling"
+    return "steady"
+
+
 def air_quality(lat: float, lon: float) -> AirReading:
     params = {
         "latitude": lat,
         "longitude": lon,
         "current": ",".join(["us_aqi"] + POLLUTANTS),
         "hourly": "us_aqi",
-        "forecast_days": 1,
+        "forecast_days": 5,
         "timezone": "auto",
     }
     data = _get(f"{AIR_URL}?{urllib.parse.urlencode(params)}")
@@ -243,10 +360,17 @@ def air_quality(lat: float, lon: float) -> AirReading:
     aqi = cur.get("us_aqi")
     if aqi is None:
         raise RuntimeError("air-quality API returned no US AQI for this location")
+    aqi = int(round(aqi))
+    hourly = data.get("hourly", {})
+    pm25 = pollutants.get("pm2_5")
     return AirReading(
-        aqi=int(round(aqi)),
+        aqi=aqi,
         pollutants=pollutants,
         dominant_pollutant=_dominant(pollutants),
         time=cur.get("time", ""),
-        peak_window=_peak_window(data.get("hourly", {})),
+        peak_window=_peak_window(hourly),
+        best_window=_best_window(hourly, aqi),
+        cause=classify_cause(pollutants),
+        cigarettes=round(pm25 / 22.0, 2) if pm25 is not None else None,
+        trend=_trend(hourly, aqi),
     )

@@ -25,6 +25,41 @@ const POLLUTANT_NAMES = {
   carbon_monoxide: "carbon monoxide",
 };
 
+// Per-group pollutant emphasis (mirrors data.GROUP_POLLUTANT_WEIGHTS). A "mild
+// nudge": only re-ranks pollutants already near the raw leader, so we never hide
+// a genuinely dominant pollutant just because it's off-profile for the group.
+const GROUP_POLLUTANT_WEIGHTS = {
+  respiratory: { ozone: 1.30, pm2_5: 1.25, nitrogen_dioxide: 1.10 },
+  heart: { pm2_5: 1.30, carbon_monoxide: 1.20, nitrogen_dioxide: 1.15 },
+  child: { pm2_5: 1.30, ozone: 1.20, nitrogen_dioxide: 1.15 },
+  pregnant: { pm2_5: 1.30, carbon_monoxide: 1.20 },
+  older_adult: { pm2_5: 1.30, ozone: 1.15 },
+  outdoor_worker: { ozone: 1.30, pm2_5: 1.20 },
+  general: {},
+};
+const NUDGE_THRESHOLD = 0.8;
+
+// Berkeley Earth: ~22 µg/m³ PM2.5 over a day ≈ one cigarette's harm.
+const CIGARETTE_PM25_PER_DAY = 22;
+
+// Plain-language causes (mirrors advice.CAUSE_TEXT).
+const CAUSE_TEXT = {
+  smoke: "Fine particles (PM2.5) dominate — typically smoke from wildfires, burning, or combustion.",
+  dust: "Coarse particles (PM10) dominate — often wind-blown dust or sand.",
+  ozone_smog: "Ground-level ozone (smog), which builds up in hot, sunny, stagnant air.",
+  traffic: "Nitrogen dioxide, mostly from traffic and combustion.",
+  industrial: "Sulfur dioxide, usually from industry or burning fossil fuels.",
+  combustion: "Carbon monoxide from combustion — traffic, heating, or fire.",
+  mixed: "A mix of everyday urban sources.",
+};
+
+const INDOOR_PLAYBOOK = [
+  "Run a HEPA purifier sized to the room (CADR near the room's area in ft²).",
+  "No purifier? A box fan with a taped-on MERV-13 filter (a Corsi-Rosenthal box) works well.",
+  "Pick one room to keep cleanest — close its door and run the filter there.",
+  "Ventilate only when outdoor air is better than indoor; otherwise keep it sealed.",
+];
+
 const COUNTRY_ALIASES = {
   uk: "GB", "u.k": "GB", britain: "GB", "great britain": "GB",
   "united kingdom": "GB", england: "GB", scotland: "GB", wales: "GB",
@@ -148,14 +183,54 @@ async function reverseGeocode(lat, lon) {
   }
 }
 
-function dominant(pollutants) {
-  let best = null, bestRatio = -1;
+// Group-aware dominant pollutant with the same mild-nudge rule as data.py.
+function dominant(pollutants, group = "general") {
+  const scored = [];
   for (const [k, v] of Object.entries(pollutants)) {
     if (v == null) continue;
-    const ratio = v / (CONCERN_REFERENCE[k] || 100);
-    if (ratio > bestRatio) { bestRatio = ratio; best = k; }
+    scored.push([v / (CONCERN_REFERENCE[k] || 100), k]);
+  }
+  if (!scored.length) return null;
+  let rawRatio = -1, rawLeader = null;
+  for (const [ratio, k] of scored) if (ratio > rawRatio) { rawRatio = ratio; rawLeader = k; }
+  const weights = GROUP_POLLUTANT_WEIGHTS[group] || {};
+  if (!Object.keys(weights).length || rawRatio <= 0) return rawLeader;
+  let best = rawLeader, bestScore = (weights[rawLeader] || 1) * rawRatio;
+  for (const [ratio, k] of scored) {
+    if (ratio >= NUDGE_THRESHOLD * rawRatio) {
+      const score = (weights[k] || 1) * ratio;
+      if (score > bestScore) { best = k; bestScore = score; }
+    }
   }
   return best;
+}
+
+function classifyCause(pollutants) {
+  const dom = dominant(pollutants);
+  if (dom == null) return null;
+  return {
+    pm2_5: "smoke", pm10: "dust", ozone: "ozone_smog",
+    nitrogen_dioxide: "traffic", sulphur_dioxide: "industrial",
+    carbon_monoxide: "combustion",
+  }[dom] || "mixed";
+}
+
+function cigarettesEquivalent(pm25, hours = 24) {
+  if (pm25 == null || pm25 < 0) return 0;
+  return Math.round((pm25 / CIGARETTE_PM25_PER_DAY) * (hours / 24) * 100) / 100;
+}
+
+function hourOf(t) {
+  const m = /T(\d{2}):/.exec(t);
+  return m ? parseInt(m[1], 10) : -1;
+}
+
+function dayLabel(when, ref) {
+  const d = new Date(when), r = new Date(ref);
+  const delta = Math.round((d.setHours(0, 0, 0, 0) - r.setHours(0, 0, 0, 0)) / 86400000);
+  if (delta <= 0) return "today";
+  if (delta === 1) return "tomorrow";
+  return new Date(when).toLocaleDateString(undefined, { weekday: "short" });
 }
 
 function peakWindow(hourly) {
@@ -170,23 +245,67 @@ function peakWindow(hourly) {
   return `around ${hh} (US AQI ~${Math.round(peak)})`;
 }
 
+// Cleanest 3h waking window across the forecast, if meaningfully better than now.
+function bestWindow(hourly, currentAqi) {
+  const times = hourly.time || [];
+  const aqis = hourly.us_aqi || [];
+  let bestA = Infinity, bestT = null;
+  for (let i = 0; i < times.length; i++) {
+    const h = hourOf(times[i]);
+    if (aqis[i] == null || h < 6 || h > 21) continue;
+    if (aqis[i] < bestA) { bestA = aqis[i]; bestT = times[i]; }
+  }
+  if (bestT == null) return null;
+  if (currentAqi != null && bestA >= currentAqi - 10) return null;
+  const h = hourOf(bestT);
+  const end = Math.min(h + 3, 24);
+  const day = dayLabel(bestT, times[0] || bestT);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${day} ${pad(h)}:00–${pad(end)}:00 (US AQI ~${Math.round(bestA)})`;
+}
+
+function trend(hourly, currentAqi) {
+  const aqis = (hourly.us_aqi || []).slice(0, 4).filter((a) => a != null);
+  if (currentAqi == null || aqis.length < 2) return null;
+  const later = aqis[aqis.length - 1];
+  if (later >= currentAqi + 15) return "rising";
+  if (later <= currentAqi - 15) return "falling";
+  return "steady";
+}
+
+function windowAdvice(aqi, tr) {
+  if (aqi <= 75) {
+    if (tr === "rising") return "OK to air out now, but close up soon — air quality is worsening.";
+    return "Outdoor air is clean enough — open the windows to ventilate.";
+  }
+  let msg = "Keep the windows closed and filter your indoor air.";
+  if (tr === "falling") msg += " Air is improving — you may be able to air out later.";
+  return msg;
+}
+
 async function airQuality(lat, lon) {
   const q = new URLSearchParams({
     latitude: lat, longitude: lon,
     current: ["us_aqi", ...POLLUTANTS].join(","),
-    hourly: "us_aqi", forecast_days: 1, timezone: "auto",
+    hourly: "us_aqi", forecast_days: 5, timezone: "auto",
   });
   const d = await getJSON(`${AIR_URL}?${q}`);
   const cur = d.current || {};
   if (cur.us_aqi == null) throw new Error("No US AQI for this location.");
   const pollutants = {};
   POLLUTANTS.forEach((k) => { if (cur[k] != null) pollutants[k] = cur[k]; });
+  const aqi = Math.round(cur.us_aqi);
+  const hourly = d.hourly || {};
   return {
-    aqi: Math.round(cur.us_aqi),
+    aqi,
     pollutants,
     dominant_pollutant: dominant(pollutants),
     time: cur.time || "",
-    peak_window: peakWindow(d.hourly || {}),
+    peak_window: peakWindow(hourly),
+    best_window: bestWindow(hourly, aqi),
+    cause: classifyCause(pollutants),
+    cigarettes: pollutants.pm2_5 != null ? cigarettesEquivalent(pollutants.pm2_5) : null,
+    trend: trend(hourly, aqi),
   };
 }
 
@@ -232,6 +351,8 @@ function personalRisk(aqi, group) {
 function advise(reading, group) {
   const risk = personalRisk(reading.aqi, group);
   const [headline, action, wear_mask] = RISK_ADVICE[risk];
+  // Group-aware "main concern": the pollutant this group is most vulnerable to.
+  const domKey = dominant(reading.pollutants, group);
   return {
     aqi: reading.aqi,
     category: category(reading.aqi),
@@ -240,10 +361,14 @@ function advise(reading, group) {
     headline,
     action,
     wear_mask,
-    dominant_pollutant: reading.dominant_pollutant
-      ? POLLUTANT_NAMES[reading.dominant_pollutant] || reading.dominant_pollutant
-      : null,
+    escalated: SENSITIVE.has(group) && risk !== baseRisk(reading.aqi),
+    dominant_pollutant: domKey ? POLLUTANT_NAMES[domKey] || domKey : null,
     peak_window: reading.peak_window,
+    best_window: reading.best_window,
+    cause: reading.cause,
+    cause_text: reading.cause ? CAUSE_TEXT[reading.cause] || null : null,
+    cigarettes: reading.cigarettes,
+    windows: windowAdvice(reading.aqi, reading.trend),
     pollutants: reading.pollutants,
     observed_at: reading.time,
   };
@@ -336,12 +461,59 @@ function pollutantBars(pollutants) {
     </div>`;
 }
 
+// Cumulative weekly cigarette-equivalent, on-device only (nothing leaves the
+// browser). Keyed by date so multiple checks in a day don't double-count.
+function recordWeeklyDose(cig) {
+  if (cig == null) return null;
+  let store = {};
+  try { store = JSON.parse(localStorage.getItem("airaware_dose") || "{}"); } catch (e) { store = {}; }
+  const today = new Date().toISOString().slice(0, 10);
+  store[today] = cig;
+  const cutoff = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+  Object.keys(store).forEach((k) => { if (k < cutoff) delete store[k]; });
+  try { localStorage.setItem("airaware_dose", JSON.stringify(store)); } catch (e) { /* private mode */ }
+  const total = Object.values(store).reduce((a, b) => a + b, 0);
+  return { total: Math.round(total * 10) / 10, days: Object.keys(store).length };
+}
+
+function cigaretteBlock(d) {
+  if (d.cigarettes == null || d.cigarettes < 0.05) return "";
+  const week = recordWeeklyDose(d.cigarettes);
+  const n = d.cigarettes;
+  const weekLine = week && week.days > 1
+    ? `<div class="cig-week">≈ ${week.total} cigarettes over the last ${week.days} days you checked (on this device).</div>`
+    : "";
+  return `
+    <div class="cig">
+      <div class="cig-head">🚬 Today's air ≈ <b>${n}</b> cigarette${n === 1 ? "" : "s"}</div>
+      ${weekLine}
+      <details class="more">
+        <summary>What does this mean?</summary>
+        <p>Based on the Berkeley Earth equivalence: breathing about 22 µg/m³ of PM2.5
+        for a day carries roughly the harm of one cigarette. It's a long-term
+        comparison to make an invisible number feel real — not a medical figure.</p>
+      </details>
+    </div>`;
+}
+
 function renderResult(d) {
   setAccent(d.category);
   const { c, offset } = ringDash(d.aqi);
   const maskTag = d.wear_mask ? `<span class="tag mask">😷 Wear an N95 outdoors</span>` : "";
   const domTag = d.dominant_pollutant ? `<span class="tag"><span class="dot"></span>${esc(d.dominant_pollutant)}</span>` : "";
   const peakTag = d.peak_window ? `<span class="tag">⏱ Worst ${esc(d.peak_window)}</span>` : "";
+  const bestTag = d.best_window ? `<span class="tag good">🌿 Cleanest ${esc(d.best_window)}</span>` : "";
+  const escNote = d.escalated
+    ? `<span class="tuned-note">raised one level for you</span>` : "";
+  const whyBlock = d.cause_text
+    ? `<p class="why"><b>Why:</b> ${esc(d.cause_text)}</p>` : "";
+  const windowsBlock = d.windows
+    ? `<div class="windows"><b>Indoors:</b> ${esc(d.windows)}
+         <details class="more">
+           <summary>Indoor playbook</summary>
+           <ul>${INDOOR_PLAYBOOK.map((s) => `<li>${esc(s)}</li>`).join("")}</ul>
+         </details>
+       </div>` : "";
 
   resultEl.innerHTML = `
     <article class="card">
@@ -356,14 +528,17 @@ function renderResult(d) {
         </div>
         <div class="card-head">
           <h2>${esc(d.location)}</h2>
-          <div class="place">Air report · for ${esc(groupLabel(d.group))}</div>
+          <div class="place">Tuned for ${esc(groupLabel(d.group))} ${escNote}</div>
           <span class="category-pill">${esc(d.category)}</span>
         </div>
       </div>
       <div class="card-body">
         <p class="headline">${esc(d.headline)}</p>
         <p class="action">${esc(d.action)}</p>
-        <div class="meta">${maskTag}${domTag}${peakTag}</div>
+        ${cigaretteBlock(d)}
+        ${whyBlock}
+        ${windowsBlock}
+        <div class="meta">${maskTag}${domTag}${peakTag}${bestTag}</div>
         ${pollutantBars(d.pollutants)}
       </div>
       <div class="card-foot">Live reading${d.observed_at ? " · " + esc(d.observed_at.replace("T", " ")) : ""} · informational, not medical advice.</div>
@@ -389,12 +564,27 @@ async function withLoading(fn) {
   }
 }
 
+// Remember the last resolved place so changing "who is this for?" re-checks
+// instantly without a redundant geocode.
+let lastPlace = null;
+
 function check(location, group) {
-  withLoading(async () => adviceForPlace(await geocode(location), group));
+  withLoading(async () => {
+    lastPlace = await geocode(location);
+    return adviceForPlace(lastPlace, group);
+  });
 }
 
 function checkCoords(lat, lon, group) {
-  withLoading(async () => adviceForPlace(await reverseGeocode(lat, lon), group));
+  withLoading(async () => {
+    lastPlace = await reverseGeocode(lat, lon);
+    return adviceForPlace(lastPlace, group);
+  });
+}
+
+function rerunForGroup(group) {
+  if (!lastPlace) return;
+  withLoading(async () => adviceForPlace(lastPlace, group));
 }
 
 const locateBtn = document.getElementById("locate");
@@ -432,6 +622,9 @@ form.addEventListener("submit", (e) => {
   if (!loc) { locInput.focus(); return; }
   check(loc, groupSelect.value);
 });
+
+// Changing "who is this for?" re-runs the last check immediately.
+groupSelect.addEventListener("change", () => rerunForGroup(groupSelect.value));
 
 document.querySelectorAll(".chip").forEach((chip) => {
   chip.addEventListener("click", () => {
