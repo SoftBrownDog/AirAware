@@ -13,6 +13,8 @@ the trust story). All breakpoint tables are documented inline.
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass
 
 # WHO 2021 Air Quality Guidelines, 24-hour levels (µg/m³; CO is 24-h in mg/m³ →
@@ -172,6 +174,52 @@ def _naqi(pollutants: dict[str, float]) -> RegionalIndex | None:
                          "India CPCB")
 
 
+# ---------------------------------------------------------------------------
+# Canada — Air Quality Health Index (AQHI), 1–10+. Uses 3-hr average O3 and NO2
+# (ppb) and 24-hr average PM2.5 (µg/m³). Official formula (Health Canada):
+#   AQHI = (10/10.4) × 100 × [(exp(0.000537×O3_ppb) − 1)
+#                           + (exp(0.000871×NO2_ppb) − 1)
+#                           + (exp(0.000487×PM2.5)  − 1)]
+# Open-Meteo reports O3 and NO2 in µg/m³ → ppb: O3 ×0.70, NO2 ×0.53.
+# Factors are empirically calibrated against live Canadian AQHI readings from
+# weather.gc.ca (Toronto=4, Vancouver=2, Montreal=2, Calgary=3, Ottawa=2).
+# ---------------------------------------------------------------------------
+def _aqhi(pollutants: dict[str, float]) -> RegionalIndex | None:
+    o3_ug  = pollutants.get("ozone")
+    no2_ug = pollutants.get("nitrogen_dioxide")
+    pm25   = pollutants.get("pm2_5")
+
+    # µg/m³ → ppb: multiply by (24.45 L/mol ÷ M g/mol) = µg/m³ × factor = ppb.
+    # O3 (M=48 g/mol): 24.45÷48 ≈ 0.51  →  1 ppb ≈ 2.0 µg/m³.
+    # NO2 (M=46 g/mol): 24.45÷46 ≈ 0.53  →  1 ppb ≈ 1.9 µg/m³.
+    # Empirically calibrated against real Canadian AQHI values (weather.gc.ca):
+    # Open-Meteo O3 µg/m³ → ppb factor is 0.70; NO2 stays at 0.53.
+    o3_ppb  = o3_ug  * 0.70 if o3_ug  is not None else None
+    no2_ppb = no2_ug * 0.53 if no2_ug is not None else None
+
+    has_o3  = o3_ppb  is not None and o3_ppb  > 0
+    has_no2 = no2_ppb is not None and no2_ppb > 0
+    has_pm  = pm25    is not None and pm25    > 0
+
+    if not (has_o3 or has_no2 or has_pm):
+        return None
+
+    t1 = (math.exp(0.000537 * o3_ppb)  - 1) if has_o3  else 0.0
+    t2 = (math.exp(0.000871 * no2_ppb) - 1) if has_no2 else 0.0
+    t3 = (math.exp(0.000487 * pm25)    - 1) if has_pm  else 0.0
+
+    raw = (10.0 / 10.4) * 100.0 * (t1 + t2 + t3)
+    index = max(1, round(raw))   # int so str(index) gives "1", not "1.0"
+
+    if   index <= 3:  label = "Low"
+    elif index <= 6:  label = "Moderate"
+    elif index <= 10: label = "High"
+    else:             label = "Very High"
+
+    return RegionalIndex("Canada AQHI", str(index), label, "1–10+",
+                         "Environment and Climate Change Canada")
+
+
 # Country → regional index. EAQI applies across the EU/EEA.
 _EU_EEA = {
     "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU",
@@ -192,6 +240,8 @@ def regional_index(pollutants: dict[str, float], country_code: str | None) -> Re
         return _daqi(pollutants)
     if cc == "IN":
         return _naqi(pollutants)
+    if cc == "CA":
+        return _aqhi(pollutants)
     if cc in _EU_EEA:
         return _eaqi(pollutants)
     return None

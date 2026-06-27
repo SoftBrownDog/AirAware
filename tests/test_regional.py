@@ -70,6 +70,57 @@ def test_naqi_co_converted_from_ug_to_mg():
     assert r.label == "Poor"
 
 
+# ---- Canada AQHI (ppb conversion: O3×0.70, NO2×0.53) ----
+#
+# Official formula (Health Canada):
+#   AQHI = (10/10.4) × 100 × [(exp(0.000537×O3_ppb)-1)
+#                             + (exp(0.000871×NO2_ppb)-1)
+#                             + (exp(0.000487×PM2.5)-1)]
+# Open-Meteo reports O3 and NO2 in µg/m³. Conversion factors (O3×0.70,
+# NO2×0.53) are empirically calibrated against live weather.gc.ca readings.
+
+def test_aqhi_pm25_only():
+    r = regional_index({"pm2_5": 5}, "CA")
+    assert r.system == "Canada AQHI" and r.value == "1" and r.label == "Low"
+    r = regional_index({"pm2_5": 35}, "CA")
+    assert r.value == "2" and r.label == "Low"
+    r = regional_index({"pm2_5": 100}, "CA")
+    assert r.value == "5" and r.label == "Moderate"
+    r = regional_index({"pm2_5": 150}, "CA")
+    assert r.value == "7" and r.label == "High"
+    r = regional_index({"pm2_5": 200}, "CA")
+    assert r.value == "10" and r.label == "High"
+
+
+def test_aqhi_ozone_ppb_conversion():
+    # O3=50 µg/m³ → 35 ppb → AQHI=2 Low.
+    r = regional_index({"ozone": 50}, "CA")
+    assert r.system == "Canada AQHI" and r.value == "2" and r.label == "Low"
+
+
+def test_aqhi_no2_ppb_conversion():
+    # NO2=50 µg/m³ → 26.5 ppb → AQHI=2 Low.
+    r = regional_index({"nitrogen_dioxide": 50}, "CA")
+    assert r.system == "Canada AQHI" and r.value == "2" and r.label == "Low"
+
+
+def test_aqhi_combined_ozone_no2_pm25():
+    # Moderate across all three: PM2.5=35(AQHI~2), O3=30ug/m=21ppb, NO2=30ug/m=16ppb
+    # Combined ~4 → Moderate.
+    r = regional_index({"pm2_5": 35, "ozone": 30, "nitrogen_dioxide": 30}, "CA")
+    assert r.system == "Canada AQHI" and r.value == "4" and r.label == "Moderate"
+
+
+def test_aqhi_very_high():
+    r = regional_index({"pm2_5": 300}, "CA")
+    assert r.value == "15" and r.label == "Very High"
+
+
+def test_aqhi_null_when_no_pollutants():
+    assert regional_index({}, "CA") is None
+    assert regional_index({"pm10": 50}, "CA") is None  # AQHI only uses O3/NO2/PM2.5
+
+
 # ---- Country mapping fallbacks ----
 
 def test_no_regional_index_for_unsupported_country():

@@ -81,6 +81,199 @@ const US_STATES = {
   wv: "west virginia", wi: "wisconsin", wy: "wyoming", dc: "district of columbia",
 };
 
+// ---------- i18n infrastructure (mirrors nothing on the Python side — pure JS) ----------
+//
+// Loads language catalogs from docs/i18n/*.json (fetched once, cached in memory).
+// Strings are accessed via t(path) where path is a dot-notation key, e.g.:
+//   t("app.check_air")   → "Check air"
+//   t("who.title")      → "Built for the people…"
+//   t("app.cig_today", { n: 3 })  → "Today's air ≈ 3 cigarettes"
+//
+// RTL languages set dir="rtl" on <html>.
+
+let _i18n = null;          // { lang, dir, name, app, who, how, ... }
+let _i18nCatalog = null;    // raw catalog object
+const _i18nCache = {};      // url → promise
+
+async function loadI18n(lang) {
+  if (_i18nCache[lang]) return _i18nCache[lang];
+  _i18nCache[lang] = (async () => {
+    try {
+      const r = await fetch(`i18n/${lang}.json`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    } catch {
+      // Fall back to English
+      try {
+        const r = await fetch("i18n/en.json");
+        return r.ok ? r.json() : {};
+      } catch {
+        return {};
+      }
+    }
+  })();
+  return _i18nCache[lang];
+}
+
+function t(key, vars) {
+  if (!_i18n) return key;
+  const parts = key.split(".");
+  let val = _i18n;
+  for (const p of parts) { val = val?.[p]; if (val === undefined) return key; }
+  if (typeof val !== "string") return key;
+  return vars
+    ? val.replace(/\{(\w+)\}/g, (_, k) => String(vars[k] ?? `{${k}}`))
+    : val;
+}
+
+function tPlural(key, count, vars) {
+  const pluralized = key.replace("_pl", count === 1 ? "" : "s");
+  return t(pluralized, { ...vars, n: count });
+}
+
+async function applyI18n(lang) {
+  _i18n = await loadI18n(lang);
+  _i18nCatalog = _i18n;
+  document.documentElement.lang = lang;
+  document.documentElement.dir = _i18n.dir || "ltr";
+  // Persist language choice
+  try { localStorage.setItem("airaware_lang", lang); } catch (_) {}
+  // Apply strings to static elements
+  applyI18nToDOM(document.body);
+}
+
+function applyI18nToDOM(root) {
+  if (!_i18nCatalog) return;
+  root.querySelectorAll("[data-i18n]").forEach((el) => {
+    const key = el.dataset.i18n;
+    const val = t(key);
+    if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+      el.placeholder = val;
+    } else {
+      el.textContent = val;
+    }
+  });
+  root.querySelectorAll("[data-i18n-html]").forEach((el) => {
+    el.innerHTML = t(el.dataset.i18nHtml);
+  });
+}
+
+// ---------- saved places (localStorage only — nothing leaves the browser) ----------
+//
+// Each saved place stores the resolved place object plus the user's group so the
+// next check is instant. We use localStorage so it persists across sessions.
+
+const SAVED_KEY = "airaware_places";
+const ALERT_KEY = "airaware_alerts";
+
+function getSavedPlaces() {
+  try { return JSON.parse(localStorage.getItem(SAVED_KEY) || "[]"); }
+  catch { return []; }
+}
+
+function savePlace(place, group) {
+  const places = getSavedPlaces();
+  // Avoid duplicates by lat/lon
+  const exists = places.some(
+    (p) => p.latitude === place.latitude && p.longitude === place.longitude
+  );
+  if (exists) return false;
+  places.unshift({ ...place, savedGroup: group, savedAt: Date.now() });
+  if (places.length > 10) places.length = 10; // cap at 10
+  try { localStorage.setItem(SAVED_KEY, JSON.stringify(places)); } catch (_) {}
+  return true;
+}
+
+function removeSavedPlace(latitude, longitude) {
+  const places = getSavedPlaces().filter(
+    (p) => !(p.latitude === latitude && p.longitude === longitude)
+  );
+  try { localStorage.setItem(SAVED_KEY, JSON.stringify(places)); } catch (_) {}
+}
+
+// ---------- opt-in browser notifications (localStorage only) ----------
+//
+// User grants permission once; AirAware fires a notification only when a saved
+// place's AQI crosses the user's threshold. Threshold defaults to "Moderate" (100).
+
+function getAlertPrefs() {
+  try { return JSON.parse(localStorage.getItem(ALERT_KEY) || "{}"); }
+  catch { return {}; }
+}
+
+function setAlertPrefs(prefs) {
+  try { localStorage.setItem(ALERT_KEY, JSON.stringify(prefs)); } catch (_) {}
+}
+
+function getAlertThreshold() {
+  const prefs = getAlertPrefs();
+  return prefs.threshold ?? 100; // default: alert when AQI > 100
+}
+
+function isAlertsEnabled() {
+  return getAlertPrefs().enabled === true;
+}
+
+async function requestAlertPermission() {
+  if (!("Notification" in window)) return "unsupported";
+  if (Notification.permission === "granted") return "granted";
+  if (Notification.permission === "denied") return "denied";
+  return Notification.requestPermission();
+}
+
+async function enableAlerts(place, group) {
+  const perm = await requestAlertPermission();
+  if (perm !== "granted") return perm;
+  const prefs = getAlertPrefs();
+  prefs.enabled = true;
+  prefs.threshold = prefs.threshold ?? 100;
+  // Remember this place as the alert-watch target
+  prefs.watchPlace = {
+    latitude: place.latitude,
+    longitude: place.longitude,
+    group: group,
+    label: placeLabel(place),
+  };
+  setAlertPrefs(prefs);
+  return "enabled";
+}
+
+function disableAlerts() {
+  const prefs = getAlertPrefs();
+  prefs.enabled = false;
+  setAlertPrefs(prefs);
+}
+
+// Check if saved place AQI crosses threshold and fire one notification per
+// threshold-crossing event (tracked in sessionStorage to avoid repeat noise).
+async function checkAlertThreshold() {
+  const prefs = getAlertPrefs();
+  if (!prefs.enabled || !prefs.watchPlace) return;
+  const { latitude, longitude, group, label } = prefs.watchPlace;
+  try {
+    const reading = await airQuality(latitude, longitude);
+    const { aqi, category } = advise(reading, group);
+    const threshold = prefs.threshold ?? 100;
+    const sessionKey = `airaware_last_alert_${latitude}_${longitude}`;
+    if (aqi <= threshold) return;
+    const last = sessionStorage.getItem(sessionKey);
+    const now = Date.now();
+    if (last && now - +last < 3600000) return; // max 1/hr per place
+    const headline = RISK_ADVICE[baseRisk(aqi)]?.[0] || "";
+    new Notification(t("app.alert_notification_title"), {
+      body: t("app.alert_notification_body", {
+        location: label,
+        aqi,
+        category,
+        headline,
+      }),
+      icon: "icons/icon-192.png",
+      badge: "icons/icon-192.png",
+    });
+    sessionStorage.setItem(sessionKey, String(now));
+  } catch (_) {}
+}
+
 // ---------- data layer ----------
 
 class LookupError extends Error {}
@@ -395,11 +588,35 @@ function naqi(p) {
   return { system: "India NAQI", value: String(idx), label: naqiCategory(idx), scale: "0–500", source: "India CPCB" };
 }
 
+// ---------- Canada AQHI (mirrors _aqhi in regional.py) ----------
+// AQHI = (10/10.4) × 100 × [(exp(0.000537×O3_ppb)−1)+(exp(0.000871×NO2_ppb)−1)+(exp(0.000487×PM2.5)−1)]
+// O3/NO2 in µg/m³ from Open-Meteo → convert to ppb (×0.70 / ×0.53).
+// Factors empirically calibrated: O3×0.70, NO2×0.53 (vs live weather.gc.ca AQHI).
+function aqhi(p) {
+  const o3_ug  = p.ozone;
+  const no2_ug = p.nitrogen_dioxide;
+  const pm25   = p.pm2_5;
+  const o3_ppb  = o3_ug  != null ? o3_ug  * 0.70 : null;
+  const no2_ppb = no2_ug != null ? no2_ug * 0.53 : null;
+  const hasO3  = o3_ppb  != null && o3_ppb  > 0;
+  const hasNO2 = no2_ppb != null && no2_ppb > 0;
+  const hasPM  = pm25   != null && pm25   > 0;
+  if (!(hasO3 || hasNO2 || hasPM)) return null;
+  const t1 = hasO3  ? (Math.exp(0.000537 * o3_ppb)  - 1) : 0;
+  const t2 = hasNO2 ? (Math.exp(0.000871 * no2_ppb) - 1) : 0;
+  const t3 = hasPM  ? (Math.exp(0.000487 * pm25)    - 1) : 0;
+  const raw = (10 / 10.4) * 100 * (t1 + t2 + t3);
+  const index = Math.max(1, Math.round(raw));
+  const label = index <= 3 ? "Low" : index <= 6 ? "Moderate" : index <= 10 ? "High" : "Very High";
+  return { system: "Canada AQHI", value: String(index), label, scale: "1–10+", source: "Environment and Climate Change Canada" };
+}
+
 function regionalIndex(pollutants, countryCode) {
   if (!countryCode) return null;
   const cc = countryCode.toUpperCase();
   if (cc === "GB") return daqi(pollutants);
   if (cc === "IN") return naqi(pollutants);
+  if (cc === "CA") return aqhi(pollutants);
   if (EU_EEA.has(cc)) return eaqi(pollutants);
   return null;
 }
@@ -736,7 +953,7 @@ async function shareCigarette(btn) {
 
 function renderResult(d) {
   setAccent(d.category);
-  const maskTag = d.wear_mask ? `<span class="tag mask">😷 Wear an N95 outdoors</span>` : "";
+  const maskTag = d.wear_mask ? `<span class="tag mask">😷 ${esc(t("app.mask_tag"))}</span>` : "";
   const domTag = d.dominant_pollutant ? `<span class="tag"><span class="dot"></span>${esc(d.dominant_pollutant)}</span>` : "";
   const peakTag = d.peak_window ? `<span class="tag">⏱ Worst ${esc(d.peak_window)}</span>` : "";
   const bestTag = d.best_window ? `<span class="tag good">🌿 Cleanest ${esc(d.best_window)}</span>` : "";
@@ -745,36 +962,48 @@ function renderResult(d) {
   const regionalPill = d.regional
     ? `<span class="regional-pill" title="${esc(d.regional.source)} · scale ${esc(d.regional.scale)}">${esc(d.regional.system)} ${esc(d.regional.value)} · ${esc(d.regional.label)}</span>` : "";
   const escNote = d.escalated
-    ? `<span class="tuned-note">raised one level for you</span>` : "";
+    ? `<span class="tuned-note">${esc(t("app.raised_for_you"))}</span>` : "";
   const obs = d.observed_at ? esc(d.observed_at.replace("T", " ")) : "—";
   const idxLine = d.regional
-    ? `US EPA AQI (primary) + ${esc(d.regional.system)} for your country`
-    : "US EPA AQI categories";
+    ? t("app.index_regional", { system: esc(d.regional.system) })
+    : t("app.index_us_aqi");
   const whyAdvice = d.escalated
-    ? "Risk is raised one band because sensitive groups should act sooner (US EPA guidance)."
-    : "Advice follows US EPA AQI category guidance.";
+    ? t("app.why_sensitive")
+    : t("app.why_this_advice");
   const trustBlock = `
     <details class="trust">
-      <summary>Where this comes from</summary>
+      <summary>${esc(t("app.where_from"))}</summary>
       <ul>
-        <li><b>Observed:</b> ${obs} (local time)</li>
-        <li><b>Data:</b> live air quality &amp; geocoding from Open-Meteo — free, open, no tracking</li>
-        <li><b>Index:</b> ${idxLine}</li>
-        <li><b>Why this advice:</b> ${whyAdvice}</li>
+        <li><b>${esc(t("app.observed"))}:</b> ${obs} (local time)</li>
+        <li><b>${esc(t("app.data_source"))}:</b> ${esc(t("app.data_source_body"))}</li>
+        <li><b>${esc(t("app.index_label"))}:</b> ${idxLine}</li>
+        <li><b>${esc(t("app.why_title"))}:</b> ${whyAdvice}</li>
       </ul>
     </details>`;
   const whyBlock = d.cause_text
-    ? `<p class="why"><b>Why:</b> ${esc(d.cause_text)}</p>` : "";
+    ? `<p class="why"><b>${esc(t("app.why_title"))}:</b> ${esc(d.cause_text)}</p>` : "";
   const windowsBlock = d.windows
     ? `<div class="windows"><b>Indoors:</b> ${esc(d.windows)}
          <details class="more">
-           <summary>Indoor playbook</summary>
+           <summary>${esc(t("app.indoor_title"))}</summary>
            <ul>${INDOOR_PLAYBOOK.map((s) => `<li>${esc(s)}</li>`).join("")}</ul>
          </details>
        </div>` : "";
 
+  // Save / alerts buttons (shown only when lastPlace is available).
+  const saveAlertBar = lastPlace
+    ? `<div class="save-row">
+         <button class="btn-save-place" type="button"
+           data-lat="${lastPlace.latitude}" data-lon="${lastPlace.longitude}" data-group="${esc(d.group || "general")}">
+           ${esc(t("app.save_place"))}
+         </button>
+         ${buildAlertUI(lastPlace, d.group || "general")}
+       </div>`
+    : "";
+
   resultEl.innerHTML = `
     <article class="card">
+      ${saveAlertBar}
       <div class="card-top">
         <div class="gauge">
           ${gaugeSvg(d.aqi, d.category)}
@@ -782,7 +1011,7 @@ function renderResult(d) {
         </div>
         <div class="card-head">
           <h2>${esc(d.location)}</h2>
-          <div class="place">Tuned for ${esc(groupLabel(d.group))} ${escNote}</div>
+          <div class="place">${esc(t("app.tuned_for", { group: groupLabel(d.group) }))} ${escNote}</div>
           <div class="pills"><span class="category-pill">${esc(d.category)}</span>${regionalPill}</div>
         </div>
       </div>
@@ -797,15 +1026,153 @@ function renderResult(d) {
       </div>
       <div class="card-foot">
         ${trustBlock}
-        <p class="foot-disc">Informational, not a substitute for medical advice.</p>
+        <p class="foot-disc">${esc(t("app.foot_disclaimer"))}</p>
       </div>
     </article>`;
 
   requestAnimationFrame(() => countUp(resultEl.querySelector(".aqi-count"), d.aqi));
 }
 
-// ---------- flows ----------
+// ---------- saved-places drawer (rendered into #saved-places in index.html) ----------
 
+function savedPlacesDrawer() {
+  const places = getSavedPlaces();
+  const el = document.getElementById("saved-places");
+  if (!el) return;
+  if (!places.length) {
+    el.innerHTML = `<p class="no-places">${esc(t("app.no_saved"))}</p>`;
+    return;
+  }
+  el.innerHTML = places.map((p) => `
+    <div class="saved-item">
+      <button class="saved-load" data-lat="${p.latitude}" data-lon="${p.longitude}" data-group="${esc(p.savedGroup || "general")}" type="button">
+        <span class="saved-name">${esc(placeLabel(p))}</span>
+        <span class="saved-group">${esc(t("app.groups." + (p.savedGroup || "general")))}</span>
+      </button>
+      <button class="saved-remove" data-lat="${p.latitude}" data-lon="${p.longitude}" type="button" aria-label="${esc(t("app.remove_saved"))}">×</button>
+    </div>`).join("");
+}
+
+function buildAlertUI(place, group) {
+  const enabled = isAlertsEnabled();
+  const prefs = getAlertPrefs();
+  const isThisPlace = prefs.watchPlace
+    && prefs.watchPlace.latitude === place.latitude
+    && prefs.watchPlace.longitude === place.longitude;
+  const threshold = prefs.threshold ?? 100;
+  return `
+    <div class="alert-bar">
+      ${enabled && isThisPlace
+        ? `<span class="alert-status on">${esc(t("app.alerts_enabled"))}</span>
+           <button class="alert-toggle off" type="button">${esc(t("app.disable_alerts"))}</button>`
+        : `<button class="alert-toggle on" type="button">${esc(t("app.enable_alerts"))}</button>
+           <label class="alert-threshold">
+             <span>${esc(t("app.alert_threshold_label"))}</span>
+             <select class="threshold-select" data-lat="${place.latitude}" data-lon="${place.longitude}" data-group="${esc(group)}">
+               <option value="50" ${threshold == 50 ? "selected" : ""}>Good (50)</option>
+               <option value="100" ${threshold == 100 ? "selected" : ""}>Moderate (100)</option>
+               <option value="150" ${threshold == 150 ? "selected" : ""}>USG (150)</option>
+               <option value="200" ${threshold == 200 ? "selected" : ""}>Unhealthy (200)</option>
+             </select>
+           </label>`
+      }
+    </div>`;
+}
+
+// Delegated handler for the save-place button (card is re-rendered each time).
+document.addEventListener("click", (e) => {
+  const saveBtn = e.target.closest(".btn-save-place");
+  if (saveBtn) {
+    const { lat, lon, group } = saveBtn.dataset;
+    const place = { latitude: +lat, longitude: +lon };
+    // Restore full place details from lastPlace if it matches
+    if (lastPlace && lastPlace.latitude === +lat && lastPlace.longitude === +lon) {
+      Object.assign(place, lastPlace);
+    }
+    const ok = savePlace(place, group);
+    saveBtn.textContent = ok ? t("app.saved") : t("app.saved");
+    saveBtn.disabled = !ok;
+    savedPlacesDrawer();
+    return;
+  }
+});
+document.addEventListener("click", (e) => {
+  const load = e.target.closest(".saved-load");
+  if (load) {
+    const { lat, lon, group } = load.dataset;
+    groupSelect.value = group;
+    checkCoords(+lat, +lon, group);
+    return;
+  }
+  const rm = e.target.closest(".saved-remove");
+  if (rm) {
+    const { lat, lon } = rm.dataset;
+    removeSavedPlace(+lat, +lon);
+    savedPlacesDrawer();
+    return;
+  }
+  const alertOn = e.target.closest(".alert-toggle.on");
+  if (alertOn) {
+    const bar = alertOn.closest(".alert-bar");
+    const lat = +bar.querySelector(".threshold-select")?.dataset.lat || lastPlace?.latitude;
+    const lon = +bar.querySelector(".threshold-select")?.dataset.lon || lastPlace?.longitude;
+    const group = bar.querySelector(".threshold-select")?.dataset.group || groupSelect.value;
+    const sel = bar.querySelector(".threshold-select");
+    const threshold = sel ? +sel.value : 100;
+    if (lastPlace) {
+      enableAlerts(lastPlace, group).then((result) => {
+        if (result === "denied") {
+          bar.innerHTML = `<p class="alert-msg warn">${esc(t("app.alert_permission_denied"))}</p>`;
+        } else {
+          const prefs2 = getAlertPrefs();
+          prefs2.threshold = threshold;
+          setAlertPrefs(prefs2);
+          savedPlacesDrawer(); // refresh so alert badge shows
+        }
+      });
+    }
+    return;
+  }
+  const alertOff = e.target.closest(".alert-toggle.off");
+  if (alertOff) {
+    disableAlerts();
+    savedPlacesDrawer();
+    return;
+  }
+});
+
+document.addEventListener("change", (e) => {
+  const sel = e.target.closest(".threshold-select");
+  if (sel) {
+    const { lat, lon, group } = sel.dataset;
+    const prefs = getAlertPrefs();
+    prefs.threshold = +sel.value;
+    prefs.watchPlace = { latitude: +lat, longitude: +lon, group, label: placeLabel({ latitude: +lat, longitude: +lon }) };
+    setAlertPrefs(prefs);
+  }
+});
+
+// Language switcher: change the <select> to apply i18n.
+const langSelect = document.getElementById("lang-select");
+if (langSelect) {
+  langSelect.addEventListener("change", () => {
+    applyI18n(langSelect.value);
+  });
+}
+
+// Saved-places drawer toggle (open/close via nav button).
+const savedBtn = document.getElementById("saved-btn");
+const savedPanel = document.getElementById("saved-places");
+if (savedBtn && savedPanel) {
+  savedBtn.addEventListener("click", () => {
+    const open = !savedPanel.hidden;
+    savedPanel.hidden = open;
+    savedBtn.setAttribute("aria-expanded", String(!open));
+    if (!open) savedPlacesDrawer(); // populate when opening
+  });
+}
+
+// ---------- flows ----------
 // V6: a shimmering skeleton of the result card while live data loads, so the
 // layout settles instead of jumping in from a blank panel.
 function skeleton() {
@@ -833,10 +1200,14 @@ async function withLoading(fn) {
   document.body.dataset.state = "loading";
   skeleton();
   try {
-    renderResult(await fn());
+    const result = await fn();
+    renderResult(result);
+    // After a successful check, update saved-places drawer and check alert threshold.
+    savedPlacesDrawer();
+    checkAlertThreshold();
   } catch (e) {
     if (e instanceof LookupError) renderError(e.message);
-    else renderError("Couldn't reach the air-quality service. Check your connection and try again.");
+    else renderError(t("app.error_generic"));
   } finally {
     document.body.dataset.state = "idle";
   }
@@ -921,6 +1292,21 @@ resultEl.addEventListener("click", (e) => {
 });
 
 placeholder();
+savedPlacesDrawer(); // populate saved-places drawer on load
+
+// i18n: restore saved language or default to browser language.
+(async () => {
+  const savedLang = (() => { try { return localStorage.getItem("airaware_lang"); } catch (_) { return null; } })();
+  const browserLang = navigator.language.slice(0, 2);
+  const supported = ["en", "es", "hi", "id", "zh", "ar", "fr"];
+  const initialLang = savedLang || (supported.includes(browserLang) ? browserLang : "en");
+  await applyI18n(initialLang);
+  // Sync lang-select to current language
+  const sel = document.getElementById("lang-select");
+  if (sel) sel.value = _i18n?.lang || "en";
+  // Check alert threshold on page load (background refresh).
+  checkAlertThreshold();
+})();
 
 // Register the service worker for offline/installable use. Guarded so it's a
 // no-op where unsupported or when opened via file:// (e.g. standalone.html).

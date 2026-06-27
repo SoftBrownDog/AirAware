@@ -13,6 +13,9 @@ const SHELL = [
   "./manifest.webmanifest",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
+  // i18n language catalogs (prefetched on service-worker install).
+  "./i18n/en.json",
+  "./i18n/es.json",
 ];
 
 self.addEventListener("install", (event) => {
